@@ -2,3 +2,14 @@
 data/
 src/__pycache__/
 other/
+*__pycache__/
+*.log
+*.csv
+*.xlsx
+*.db
+*.json
+*.pkl
+*.zip
+*.tar.gz
+*.egg-info/
+venv/
