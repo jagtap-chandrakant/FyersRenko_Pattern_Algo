@@ -1,0 +1,63 @@
+{
+  "2025": [
+    {"date": "2025-01-26", "name": "Republic Day"},
+    {"date": "2025-03-14", "name": "Mahashivratri"},
+    {"date": "2025-03-31", "name": "Holi"},
+    {"date": "2025-04-10", "name": "Mahavir Jayanti"},
+    {"date": "2025-04-14", "name": "Dr. Ambedkar Jayanti"},
+    {"date": "2025-04-18", "name": "Good Friday"},
+    {"date": "2025-05-01", "name": "Maharashtra Day"},
+    {"date": "2025-08-15", "name": "Independence Day"},
+    {"date": "2025-08-27", "name": "Ganesh Chaturthi"},
+    {"date": "2025-10-02", "name": "Gandhi Jayanti"},
+    {"date": "2025-10-21", "name": "Dussehra"},
+    {"date": "2025-11-01", "name": "Diwali-Laxmi Pujan"},
+    {"date": "2025-11-05", "name": "Gurunanak Jayanti"},
+    {"date": "2025-12-25", "name": "Christmas"}
+  ],
+  "special_sessions_2025": [
+    {"date": "2025-11-02", "name": "Special Trading Session for Diwali"}
+  ],
+  "2026": [
+    {"date": "2026-01-15", "name": "Maharashtra Election Holiday"},
+    {"date": "2026-01-26", "name": "Republic Day"},
+    {"date": "2026-03-03", "name": "Holi"},
+    {"date": "2026-03-26", "name": "Shri Ram Navami"},
+    {"date": "2026-03-31", "name": "Shri Mahavir Jayanti"},
+    {"date": "2026-04-03", "name": "Good Friday"},
+    {"date": "2026-05-01", "name": "Maharashtra Day"},
+    {"date": "2026-06-26", "name": "Muharram"},
+    {"date": "2026-08-15", "name": "Independence Day"},
+    {"date": "2026-09-14", "name": "Ganesh Chaturthi"},
+    {"date": "2026-10-02", "name": "Gandhi Jayanti"},
+    {"date": "2026-10-20", "name": "Dussehra"},
+    {"date": "2026-11-10", "name": "Diwali Balipratipada"},
+    {"date": "2026-11-24", "name": "Guru Nanak Dev Prakash Gurpurab"},
+    {"date": "2026-12-25", "name": "Christmas"}
+  ],
+  "special_sessions_2026": [
+    {"date": "2026-02-01", "name": "Budget Session"},
+    {"date": "2026-11-04", "name": "Special Trading Session for Diwali"}
+  ],
+  "2027": [
+    {"date": "2027-01-26", "name": "Republic Day"},
+    {"date": "2027-03-23", "name": "Mahashivratri"},
+    {"date": "2027-03-29", "name": "Holi"},
+    {"date": "2027-04-02", "name": "Good Friday"},
+    {"date": "2027-04-14", "name": "Dr. Ambedkar Jayanti"},
+    {"date": "2027-04-21", "name": "Ram Navami"},
+    {"date": "2027-04-25", "name": "Mahavir Jayanti"},
+    {"date": "2027-05-01", "name": "Maharashtra Day"},
+    {"date": "2027-08-15", "name": "Independence Day"},
+    {"date": "2027-09-06", "name": "Ganesh Chaturthi"},
+    {"date": "2027-10-02", "name": "Gandhi Jayanti"},
+    {"date": "2027-10-08", "name": "Dussehra"},
+    {"date": "2027-10-20", "name": "Diwali-Laxmi Pujan"},
+    {"date": "2027-11-25", "name": "Gurunanak Jayanti"},
+    {"date": "2027-12-25", "name": "Christmas"}
+  ],
+  "special_sessions_2027": [
+    {"date": "2027-02-01", "name": "Budget Session"},
+    {"date": "2027-10-21", "name": "Special Trading Session for Diwali"}
+  ]
+}
