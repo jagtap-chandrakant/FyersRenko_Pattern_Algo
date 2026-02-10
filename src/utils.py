@@ -329,12 +329,6 @@ def calculate_next_expiry(base_date: Optional[date] = None) -> date:
     return candidate
 
 
-def calculate_next_tuesday(base_date: Optional[date] = None) -> datetime:
-    """Alias returning datetime at market close."""
-    expiry_date = calculate_next_expiry(base_date)
-    return datetime.combine(expiry_date, MARKET_CLOSE)
-
-
 def parse_expiry_date(expiry_str: str) -> date:
     """
     Parse expiry date string to date object.
@@ -376,58 +370,6 @@ def is_expiry_day_today(expiry_str: str) -> bool:
     except ValueError as exc:
         logging.error("Error parsing expiry '%s': %s", expiry_str, exc)
         return False
-
-
-# ============================================================================
-# OPTION SYMBOL GENERATION (LONG-ONLY SYSTEM)
-# ============================================================================
-
-
-def calculate_strike(
-    nifty_price: float, signal: str, itm_pct: float = DEFAULT_ITM_PCT
-) -> tuple:
-    """
-    Calculate strike price and option type for LONG-ONLY system.
-
-    LONG-ONLY means we always BUY options (never short/write):
-    - LONG signal = Buy CE (Call) - betting price goes UP
-    - SHORT signal = Buy PE (Put) - betting price goes DOWN
-
-    Args:
-        nifty_price: Current Nifty price
-        signal: "LONG" (buy CE) or "SHORT" (buy PE)
-        itm_pct: ITM adjustment percentage (default: 0.2%)
-
-    Returns:
-        Tuple of (strike, option_type)
-    """
-    if nifty_price <= 0:
-        raise ValueError(f"Invalid Nifty price: {nifty_price}")
-
-    if signal not in ("LONG", "SHORT"):
-        raise ValueError(f"Invalid signal: {signal}. Must be 'LONG' or 'SHORT'")
-
-    # Round to nearest strike
-    base_strike = round(nifty_price / STRIKE_INTERVAL) * STRIKE_INTERVAL
-
-    # Calculate ITM adjustment (minimum one strike interval)
-    itm_points = (
-        round((nifty_price * itm_pct / 100) / STRIKE_INTERVAL) * STRIKE_INTERVAL
-    )
-    itm_points = max(itm_points, STRIKE_INTERVAL)
-
-    if signal == "LONG":
-        # LONG = Buy CE (Call) - ITM means strike BELOW spot
-        strike = base_strike - itm_points
-        option_type = "CE"
-    else:
-        # SHORT = Buy PE (Put) - ITM means strike ABOVE spot
-        strike = base_strike + itm_points
-        option_type = "PE"
-
-    strike = max(MIN_STRIKE, strike)
-
-    return strike, option_type
 
 
 # ============================================================================
@@ -529,65 +471,6 @@ def get_synthetic_future_symbols(
     }
 
 
-def get_option_symbol(
-    nifty_price: float, signal: str, expiry_str: str, itm_pct: float = DEFAULT_ITM_PCT
-) -> str:
-    """
-    Generate Fyers option symbol for LONG-ONLY system.
-
-    Format: NSE:NIFTY{YY}{M}{DD}{STRIKE}{CE/PE}
-
-    Args:
-        nifty_price: Current Nifty price
-        signal: "LONG" (buy CE) or "SHORT" (buy PE)
-        expiry_str: Expiry date string
-        itm_pct: ITM adjustment percentage
-
-    Returns:
-        Option symbol (e.g., "NSE:NIFTY2612025850PE")
-    """
-    if nifty_price <= 0:
-        raise ValueError(f"Invalid Nifty price: {nifty_price}")
-
-    if signal not in ("LONG", "SHORT"):
-        raise ValueError(f"Invalid signal: {signal}. Must be 'LONG' or 'SHORT'")
-
-    if not expiry_str:
-        raise ValueError("Expiry string cannot be empty")
-
-    # Check expiry rollover
-    try:
-        expiry_date = parse_expiry_date(expiry_str)
-        if expiry_date <= date.today():
-            expiry_date = calculate_next_expiry()
-            logging.info("Expiry rollover: %s -> %s", expiry_str, expiry_date)
-    except ValueError:
-        logging.warning("Invalid expiry '%s', using next expiry", expiry_str)
-        expiry_date = calculate_next_expiry()
-
-    # Calculate strike and option type
-    strike, option_type = calculate_strike(nifty_price, signal, itm_pct)
-
-    # Format expiry for symbol: YY + M + DD
-    year_2digit = expiry_date.strftime("%y")  # "26"
-    month_code = MONTH_CODES[expiry_date.month]  # "1" for Jan
-    day_2digit = expiry_date.strftime("%d")  # "20"
-
-    # Build symbol
-    symbol = f"NSE:NIFTY{year_2digit}{month_code}{day_2digit}{strike}{option_type}"
-
-    logging.debug(
-        "Symbol: %s | Signal=%s -> Buy %s | Nifty=%.2f | Strike=%d",
-        symbol,
-        signal,
-        option_type,
-        nifty_price,
-        strike,
-    )
-
-    return symbol
-
-
 def parse_option_symbol(symbol: str) -> Optional[Dict[str, Any]]:
     """
     Parse Fyers option symbol to extract components.
@@ -687,15 +570,12 @@ __all__ = [
     "is_weekend",
     # Expiry
     "calculate_next_expiry",
-    "calculate_next_tuesday",
     "parse_expiry_date",
     "is_expiry_day_today",
     "format_expiry_for_symbol",
     # Option symbols (LONG-ONLY)
-    "get_option_symbol",
     "parse_option_symbol",
     "extract_strike_display",
-    "calculate_strike",
     # Market timing
     "is_market_hours",
     "is_market_about_to_close",

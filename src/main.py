@@ -656,7 +656,7 @@ def calculate_lots(
     current_pnl: float,
     initial_lots: int,
     max_lots: int,
-    capital_per_lot: float = CAPITAL_PER_LOT
+    capital_per_lot: float = CAPITAL_PER_LOT,
 ) -> int:
     """
     Calculate position size based on broker capital or system equity.
@@ -679,24 +679,32 @@ def calculate_lots(
     if broker_capital is not None and broker_capital > 0:
         affordable_lots = int(broker_capital / capital_per_lot)
         lots = max(initial_lots, min(affordable_lots, max_lots))
-        
+
         logging.info(
             "📊 Position sizing (BROKER): Capital=₹%.2f → %d lots (min=%d, max=%d, per_lot=₹%.0f)",
-            broker_capital, lots, initial_lots, max_lots, capital_per_lot
+            broker_capital,
+            lots,
+            initial_lots,
+            max_lots,
+            capital_per_lot,
         )
-        
+
         return lots
-    
+
     # Fallback: Use system calculation
     system_capital = initial_lots * capital_per_lot + current_pnl
     affordable_lots = int(system_capital / capital_per_lot)
     lots = max(initial_lots, min(affordable_lots, max_lots))
-    
+
     logging.info(
         "📊 Position sizing (SYSTEM): Capital=₹%.2f (PnL=₹%.2f) → %d lots (min=%d, max=%d)",
-        system_capital, current_pnl, lots, initial_lots, max_lots
+        system_capital,
+        current_pnl,
+        lots,
+        initial_lots,
+        max_lots,
     )
-    
+
     return lots
 
 
@@ -740,18 +748,18 @@ def generate_daily_report(
     """
     if not trades:
         report = _empty_report()
-        
+
         # ✅ USE BROKER CAPITAL AS PRIMARY SOURCE
         if broker_capital_start is not None:
             report["initial_capital"] = broker_capital_start
         else:
             report["initial_capital"] = STRATEGY["initial_lots"] * CAPITAL_PER_LOT
-            
+
         if broker_capital_end is not None:
             report["final_equity"] = broker_capital_end
         else:
             report["final_equity"] = report["initial_capital"]
-            
+
         report["broker_capital_start"] = broker_capital_start
         report["broker_capital_end"] = broker_capital_end
         report["broker_brokerage"] = broker_brokerage
@@ -791,8 +799,8 @@ def generate_daily_report(
     else:
         initial_capital = STRATEGY["initial_lots"] * CAPITAL_PER_LOT
         logging.info(
-            "📊 Using CONFIGURED capital: ₹%.2f (broker data unavailable)", 
-            initial_capital
+            "📊 Using CONFIGURED capital: ₹%.2f (broker data unavailable)",
+            initial_capital,
         )
 
     # Calculate system equity (for comparison)
@@ -832,7 +840,9 @@ def generate_daily_report(
     if variance is not None and abs(variance) > 1:
         logging.info(
             "📊 Variance Analysis: System PnL=₹%.2f, Broker PnL=₹%.2f, Diff=₹%.2f",
-            system_pnl, broker_pnl, variance
+            system_pnl,
+            broker_pnl,
+            variance,
         )
 
     return {
@@ -872,7 +882,6 @@ def generate_daily_report(
     }
 
 
-
 def _calculate_pattern_stats(trades: List[Dict[str, Any]]) -> Dict[str, Dict[str, int]]:
     """
     Calculate pattern-level statistics.
@@ -900,42 +909,6 @@ def _calculate_pattern_stats(trades: List[Dict[str, Any]]) -> Dict[str, Dict[str
             pattern_stats[pattern_name]["losses"] += 1
 
     return pattern_stats
-
-
-def _get_broker_capital() -> Optional[float]:
-    """
-    Get current capital from broker (funds available).
-
-    Returns:
-        Broker capital or None if unavailable
-    """
-    global _trader_instance
-
-    try:
-        # Access trader instance's order_manager
-        if (
-            _trader_instance
-            and hasattr(_trader_instance, "order_manager")
-            and _trader_instance.order_manager
-        ):
-            fyers = _trader_instance.order_manager.fyers
-
-            response = fyers.funds()
-
-            if response and response.get("code") == 200:
-                fund_limit = response.get("fund_limit", [])
-                if fund_limit:
-                    # Get equity segment available balance
-                    for segment in fund_limit:
-                        if segment.get("title") == "Equity":
-                            available = segment.get("equityAmount", 0)
-                            return float(available)
-
-        return None
-
-    except Exception as exc:
-        logging.debug("Failed to fetch broker capital: %s", exc)
-        return None
 
 
 def _empty_report() -> Dict[str, Any]:
@@ -1856,7 +1829,9 @@ class Trader:
             if code != 200 or status != "ok":
                 logging.error(
                     "❌ Funds API failed: code=%s, status=%s, message=%s",
-                    code, status, message
+                    code,
+                    status,
+                    message,
                 )
                 return None
 
@@ -1872,7 +1847,7 @@ class Trader:
                     logging.debug(
                         "  - %s: ₹%.2f",
                         segment.get("title", "N/A"),
-                        segment.get("equityAmount", 0)
+                        segment.get("equityAmount", 0),
                     )
 
             # Build lookup dictionary (case-insensitive)
@@ -1888,14 +1863,12 @@ class Trader:
                 available = funds_dict["available balance"]
                 if available > 0:
                     logging.info(
-                        "✅ Broker capital: ₹%.2f (Available Balance)", 
-                        available
+                        "✅ Broker capital: ₹%.2f (Available Balance)", available
                     )
                     return float(available)
                 else:
                     logging.warning(
-                        "⚠️ Available Balance is %.2f (non-positive)", 
-                        available
+                        "⚠️ Available Balance is %.2f (non-positive)", available
                     )
 
             # Priority 2: Clear Balance
@@ -1903,8 +1876,7 @@ class Trader:
                 clear = funds_dict["clear balance"]
                 if clear > 0:
                     logging.info(
-                        "✅ Broker capital: ₹%.2f (Clear Balance - fallback)", 
-                        clear
+                        "✅ Broker capital: ₹%.2f (Clear Balance - fallback)", clear
                     )
                     return float(clear)
 
@@ -1913,15 +1885,15 @@ class Trader:
                 total = funds_dict["total balance"]
                 if total > 0:
                     logging.warning(
-                        "⚠️ Using Total Balance: ₹%.2f (Available/Clear not found)", 
-                        total
+                        "⚠️ Using Total Balance: ₹%.2f (Available/Clear not found)",
+                        total,
                     )
                     return float(total)
 
             # Nothing found
             logging.error(
-                "❌ No valid balance found. Available titles: %s", 
-                ", ".join(funds_dict.keys())
+                "❌ No valid balance found. Available titles: %s",
+                ", ".join(funds_dict.keys()),
             )
             return None
 
@@ -1932,7 +1904,9 @@ class Trader:
             logging.error("❌ Invalid data type in funds response: %s", exc)
             return None
         except Exception as exc:
-            logging.error("❌ Unexpected error fetching broker capital: %s", exc, exc_info=True)
+            logging.error(
+                "❌ Unexpected error fetching broker capital: %s", exc, exc_info=True
+            )
             return None
 
     def _fetch_broker_brokerage(self) -> float:
@@ -2013,11 +1987,11 @@ class Trader:
     def _record_broker_capital_start(self) -> None:
         """Record broker capital at day start with enhanced logging."""
         capital = self._fetch_broker_capital()
-        
+
         if capital is not None:
             self.broker_capital_start = capital
             logging.info("📊 Day Start Capital (BROKER): ₹%.2f", capital)
-            
+
             print(f"\n{'=' * 80}")
             print(f"📊 BROKER CAPITAL (Day Start)")
             print(f"   Available: ₹{capital:,.2f}")
@@ -2027,12 +2001,12 @@ class Trader:
         else:
             # Fallback to configured capital
             self.broker_capital_start = STRATEGY["initial_lots"] * CAPITAL_PER_LOT
-            
+
             logging.warning(
                 "⚠️ Broker capital unavailable - using configured: ₹%.2f",
-                self.broker_capital_start
+                self.broker_capital_start,
             )
-            
+
             print(f"\n{'=' * 80}")
             print(f"⚠️ BROKER CAPITAL UNAVAILABLE")
             print(f"   Using Configured: ₹{self.broker_capital_start:,.2f}")
@@ -2645,19 +2619,19 @@ class Trader:
         if action in ("LONG", "SHORT"):
             self.trade_number += 1
             signal_data["trade_number"] = self.trade_number
-            
+
             # ✅ FETCH BROKER CAPITAL FOR POSITION SIZING
             broker_capital = self._fetch_broker_capital()
-            
+
             # Calculate lots using broker capital (with fallback to system calculation)
             signal_data["lots"] = calculate_lots(
                 broker_capital=broker_capital,
                 current_pnl=self.daily_pnl,
                 initial_lots=STRATEGY["initial_lots"],
                 max_lots=STRATEGY["max_lots"],
-                capital_per_lot=CAPITAL_PER_LOT
+                capital_per_lot=CAPITAL_PER_LOT,
             )
-            
+
             signal_data["expiry"] = expiry
 
         elif action == "EXIT":
