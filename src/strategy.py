@@ -61,6 +61,8 @@ class RenkoStrategy:
         # Thresholds (derived from last brick — always up to date)
         self._green_cont_threshold: float = 0.0
         self._red_cont_threshold: float = 0.0
+        self._green_reversal_threshold: float = 0.0
+        self._red_reversal_threshold: float = 0.0
 
         # Tracking
         self.last_processed_time: Optional[datetime] = None
@@ -261,13 +263,22 @@ class RenkoStrategy:
         Called after every brick formation. These thresholds are used
         to determine if the next close price forms a new brick.
 
-        GREEN continuation = brick_high + brick_size
-        RED continuation   = brick_low - brick_size
-        Reversal thresholds are the same (just opposite direction).
+        Continuation: 1 brick size from edge (same direction)
+        Reversal: 2 brick sizes from opposite edge (direction change)
         """
         self._brick_size = round(self._brick_close * self._brick_pct, 2)
+
+        # Continuation thresholds (1 brick size)
         self._green_cont_threshold = round(self._brick_high + self._brick_size, 2)
         self._red_cont_threshold = round(self._brick_low - self._brick_size, 2)
+
+        # Reversal thresholds (2 brick sizes from opposite edge)
+        self._green_reversal_threshold = round(
+            self._brick_low - (2 * self._brick_size), 2
+        )
+        self._red_reversal_threshold = round(
+            self._brick_high + (2 * self._brick_size), 2
+        )
 
     def _process_close(
         self, current_price: float, volume: float, timestamp: datetime
@@ -288,15 +299,19 @@ class RenkoStrategy:
         # CASE 1: GREEN TREND
         if self._trend == 1:
             if current_price >= self._green_cont_threshold:
+                # GREEN continuation (price moved up 1 brick)
                 self._add_continuation_bricks(current_price, timestamp, direction=1)
-            elif current_price <= self._red_cont_threshold:
+            elif current_price <= self._green_reversal_threshold:
+                # GREEN → RED reversal (price dropped 2 bricks)
                 self._add_reversal_bricks(current_price, timestamp, new_direction=-1)
 
         # CASE 2: RED TREND
         elif self._trend == -1:
             if current_price <= self._red_cont_threshold:
+                # RED continuation (price moved down 1 brick)
                 self._add_continuation_bricks(current_price, timestamp, direction=-1)
-            elif current_price >= self._green_cont_threshold:
+            elif current_price >= self._red_reversal_threshold:
+                # RED → GREEN reversal (price rose 2 bricks)
                 self._add_reversal_bricks(current_price, timestamp, new_direction=1)
 
         # CASE 3: INITIAL (no trend yet)
@@ -376,8 +391,8 @@ class RenkoStrategy:
         """
         Add reversal bricks (direction change) one at a time.
 
-        CRITICAL FIX: Ensure first reversal brick starts from OPPOSITE edge
-        to prevent overlapping bricks at same level.
+        CRITICAL FIX: Start from opposite edge to ensure proper brick connection.
+        Apply 2-brick rule: plot (actual_bricks - 1), minimum 1.
 
         Args:
             current_price: Target price
@@ -387,41 +402,46 @@ class RenkoStrategy:
         first_brick = True
         bricks_added = 0
 
-        # CRITICAL: Start from the OPPOSITE edge for reversal
+        # CRITICAL FIX: Start from opposite edge of previous brick
         if new_direction == 1:
-            # Reversing to GREEN: Start from previous brick's LOW
-            self._brick_close = self._brick_low
+            # GREEN reversal: Start from previous RED brick's LOW
+            reversal_start = self._brick_low
+            price_movement = current_price - reversal_start
         else:
-            # Reversing to RED: Start from previous brick's HIGH
-            self._brick_close = self._brick_high
+            # RED reversal: Start from previous GREEN brick's HIGH
+            reversal_start = self._brick_high
+            price_movement = reversal_start - current_price
 
-        while True:
+        # Calculate how many bricks the price actually moved
+        brick_size = round(reversal_start * self._brick_pct, 2)
+        if brick_size <= 0:
+            brick_size = self._brick_size  # Fallback to last known size
+
+        actual_bricks = int(price_movement / brick_size) + 1
+
+        # Apply 2-brick rule: plot (actual_bricks - 1), minimum 1
+        bricks_to_plot = max(1, actual_bricks - 1)
+
+        # Start building from reversal_start
+        self._brick_close = reversal_start
+
+        for _ in range(bricks_to_plot):
+            # Recalculate brick size for current close (adaptive)
             brick_size = round(self._brick_close * self._brick_pct, 2)
             if brick_size <= 0:
                 break
 
             if new_direction == 1:
-                # GREEN brick
-                new_close = round(self._brick_close + brick_size, 2)
-                threshold = round(self._brick_high + brick_size, 2)
-
-                if current_price < threshold:
-                    break
-
-                self._brick_close = new_close
+                # GREEN brick: close moves UP
+                self._brick_close = round(self._brick_close + brick_size, 2)
                 self._brick_low = round(self._brick_close - brick_size, 2)
-                self._brick_high = round(self._brick_close, 2)
+                self._brick_high = self._brick_close
+
             else:
-                # RED brick
-                new_close = round(self._brick_close - brick_size, 2)
-                threshold = round(self._brick_low - brick_size, 2)
-
-                if current_price > threshold:
-                    break
-
-                self._brick_close = new_close
+                # RED brick: close moves DOWN
+                self._brick_close = round(self._brick_close - brick_size, 2)
                 self._brick_high = round(self._brick_close + brick_size, 2)
-                self._brick_low = round(self._brick_close, 2)
+                self._brick_low = self._brick_close
 
             self._trend = new_direction
 
@@ -447,18 +467,23 @@ class RenkoStrategy:
             self.renko_bricks.append(brick)
             self._new_brick_indices.append(len(self.renko_bricks) - 1)
 
-        # Floating-point safety: ensure at least 1 reversal brick
+            # Update thresholds for next brick (adaptive sizing)
+            self._update_thresholds()
+
+        # Safety: Ensure at least 1 reversal brick was added
         if bricks_added == 0:
             brick_size = round(self._brick_close * self._brick_pct, 2)
             if brick_size > 0:
                 if new_direction == 1:
+                    # GREEN brick
                     self._brick_close = round(self._brick_close + brick_size, 2)
                     self._brick_low = round(self._brick_close - brick_size, 2)
-                    self._brick_high = round(self._brick_close, 2)
+                    self._brick_high = self._brick_close
                 else:
+                    # RED brick
                     self._brick_close = round(self._brick_close - brick_size, 2)
                     self._brick_high = round(self._brick_close + brick_size, 2)
-                    self._brick_low = round(self._brick_close, 2)
+                    self._brick_low = self._brick_close
 
                 self._trend = new_direction
                 self._consecutive = 1
@@ -476,11 +501,10 @@ class RenkoStrategy:
 
                 self.renko_bricks.append(brick)
                 self._new_brick_indices.append(len(self.renko_bricks) - 1)
-                bricks_added = 1
 
         self._acc_vol = 0.0
 
-        # Update thresholds after all bricks added
+        # Final threshold update after all reversal bricks added
         self._update_thresholds()
 
     # =========================================================================
