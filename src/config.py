@@ -380,7 +380,7 @@ PATTERNS = {
 
 STRATEGY: Dict[str, Any] = {
     # Renko parameters
-    "renko_brick_pct": 0.0004,
+    "renko_brick_pct": 0.0003,
     "renko_reversal": 2,
     # Exit parameters
     "exit_trailing_bricks": 2,
