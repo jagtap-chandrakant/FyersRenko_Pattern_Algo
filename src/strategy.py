@@ -31,59 +31,28 @@ class RenkoIndicators:
     Matches backtest: Wilder's smoothing RSI, Simple MA.
     """
 
-    def __init__(self, config: Dict[str, Any]) -> None:
-        """Initialize strategy with configuration."""
-        self.config = config
+    def __init__(self, rsi_period: int = 14, ma_period: int = 40) -> None:
+        self._rsi_period = rsi_period
+        self._ma_period = ma_period
 
-        # Renko parameters
-        self._brick_pct = config["renko_brick_pct"]
-        self._exit_bricks = config["exit_trailing_bricks"]
-        self._entry_start = dtime.fromisoformat(config["entry_start_time"])
+        # RSI state
+        self._avg_gain: Optional[float] = None
+        self._avg_loss: Optional[float] = None
+        self._rsi_count: int = 0
+        self._initial_gains: List[float] = []
+        self._initial_losses: List[float] = []
+        self._last_close: Optional[float] = None
 
-        # Position state
-        self.position = 0  # 0=flat, 1=long, -1=short
-        self.entry_info: Optional[Dict[str, Any]] = None
+        # MA state
+        self._ma_closes: deque = deque(maxlen=ma_period)
 
-        # Trailing stop tracking
-        self.peak_price: Optional[float] = None
-        self.trough_price: Optional[float] = None
-
-        # Renko state (incremental — NO full rebuild)
-        self.renko_bricks: List[Dict[str, Any]] = []
-        self._brick_high: float = 0.0
-        self._brick_low: float = 0.0
-        self._brick_close: float = 0.0
-        self._brick_size: float = 0.0
-        self._trend: int = 0  # 1=GREEN, -1=RED, 0=initial
-        self._consecutive: int = 0
-        self._acc_vol: float = 0.0
-        self._initialized: bool = False
-
-        # Thresholds (derived from last brick — always up to date)
-        self._green_cont_threshold: float = 0.0
-        self._red_cont_threshold: float = 0.0
-        self._green_reversal_threshold: float = 0.0
-        self._red_reversal_threshold: float = 0.0
-
-        # Tracking
-        self.last_processed_time: Optional[datetime] = None
-        self._new_brick_indices: List[int] = []
-
-        # Pattern logging
-        self.detected_patterns: List[Dict[str, Any]] = []
-
-        # v7.4.0: Indicators and Filters
-        rsi_period = FILTERS.get("f2_rsi_alignment", {}).get("rsi_period", 14)
-        ma_period = FILTERS.get("f1_ma_alignment", {}).get("ma_period", 40)
-        self.indicators = RenkoIndicators(rsi_period=rsi_period, ma_period=ma_period)
-        self.filters = FilterEngine(FILTERS)
-        self.filtered_signals: List[Dict[str, Any]] = []
+        # Current values
+        self._current_rsi: float = float("nan")
+        self._current_ma: float = float("nan")
+        self._current_disparity: float = float("nan")
 
         logging.info(
-            "RenkoStrategy v7.4.0: brick=%.4f%%, exit=%d bricks, filters=%s",
-            self._brick_pct * 100,
-            self._exit_bricks,
-            "ENABLED" if FILTERS.get("enabled", True) else "DISABLED",
+            "RenkoIndicators initialized: RSI(%d), MA(%d)", rsi_period, ma_period
         )
 
     def on_new_brick(self, close_price: float) -> None:
@@ -237,10 +206,19 @@ class RenkoStrategy:
         # Pattern logging
         self.detected_patterns: List[Dict[str, Any]] = []
 
+        # v7.4.0: Indicators and Filters
+        # These MUST be created here before initialize_from_warmup() is called
+        rsi_period = FILTERS.get("f2_rsi_alignment", {}).get("rsi_period", 14)
+        ma_period = FILTERS.get("f1_ma_alignment", {}).get("ma_period", 40)
+        self.indicators = RenkoIndicators(rsi_period=rsi_period, ma_period=ma_period)
+        self.filters = FilterEngine(FILTERS)
+        self.filtered_signals: List[Dict[str, Any]] = []
+
         logging.info(
-            "RenkoStrategy initialized: brick=%.4f%%, exit=%d bricks",
+            "RenkoStrategy v7.4.0: brick=%.4f%%, exit=%d bricks, filters=%s",
             self._brick_pct * 100,
             self._exit_bricks,
+            "ENABLED" if FILTERS.get("enabled", True) else "DISABLED",
         )
 
     # =========================================================================
