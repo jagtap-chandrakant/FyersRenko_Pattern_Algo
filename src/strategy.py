@@ -9,14 +9,175 @@ Implements pattern-based trading strategy with:
 - 2-brick trailing stop exit
 
 Author: Chandrakant Jagtap
-Version: 7.0.0 (Incremental Renko)
+Version: 7.1.0 (Edge-Based Brick Sizing - FIXED)
 """
 
 import logging
+import math
+from collections import deque
 from datetime import datetime, time as dtime
 from typing import Dict, List, Optional, Any
 
-from src.config import PATTERNS, STRATEGY
+from src.config import PATTERNS, STRATEGY, FILTERS
+
+# =============================================================================
+# RENKO INDICATOR CALCULATOR
+# =============================================================================
+
+
+class RenkoIndicators:
+    """
+    Calculates RSI and MA on Renko brick closes incrementally.
+    Matches backtest: Wilder's smoothing RSI, Simple MA.
+    """
+
+    def __init__(self, config: Dict[str, Any]) -> None:
+        """Initialize strategy with configuration."""
+        self.config = config
+
+        # Renko parameters
+        self._brick_pct = config["renko_brick_pct"]
+        self._exit_bricks = config["exit_trailing_bricks"]
+        self._entry_start = dtime.fromisoformat(config["entry_start_time"])
+
+        # Position state
+        self.position = 0  # 0=flat, 1=long, -1=short
+        self.entry_info: Optional[Dict[str, Any]] = None
+
+        # Trailing stop tracking
+        self.peak_price: Optional[float] = None
+        self.trough_price: Optional[float] = None
+
+        # Renko state (incremental — NO full rebuild)
+        self.renko_bricks: List[Dict[str, Any]] = []
+        self._brick_high: float = 0.0
+        self._brick_low: float = 0.0
+        self._brick_close: float = 0.0
+        self._brick_size: float = 0.0
+        self._trend: int = 0  # 1=GREEN, -1=RED, 0=initial
+        self._consecutive: int = 0
+        self._acc_vol: float = 0.0
+        self._initialized: bool = False
+
+        # Thresholds (derived from last brick — always up to date)
+        self._green_cont_threshold: float = 0.0
+        self._red_cont_threshold: float = 0.0
+        self._green_reversal_threshold: float = 0.0
+        self._red_reversal_threshold: float = 0.0
+
+        # Tracking
+        self.last_processed_time: Optional[datetime] = None
+        self._new_brick_indices: List[int] = []
+
+        # Pattern logging
+        self.detected_patterns: List[Dict[str, Any]] = []
+
+        # v7.4.0: Indicators and Filters
+        rsi_period = FILTERS.get("f2_rsi_alignment", {}).get("rsi_period", 14)
+        ma_period = FILTERS.get("f1_ma_alignment", {}).get("ma_period", 40)
+        self.indicators = RenkoIndicators(rsi_period=rsi_period, ma_period=ma_period)
+        self.filters = FilterEngine(FILTERS)
+        self.filtered_signals: List[Dict[str, Any]] = []
+
+        logging.info(
+            "RenkoStrategy v7.4.0: brick=%.4f%%, exit=%d bricks, filters=%s",
+            self._brick_pct * 100,
+            self._exit_bricks,
+            "ENABLED" if FILTERS.get("enabled", True) else "DISABLED",
+        )
+
+    def on_new_brick(self, close_price: float) -> None:
+        """Update indicators with new brick close price."""
+        # --- MA ---
+        self._ma_closes.append(close_price)
+        if len(self._ma_closes) >= self._ma_period:
+            self._current_ma = sum(self._ma_closes) / len(self._ma_closes)
+            if self._current_ma > 0:
+                self._current_disparity = (
+                    (close_price - self._current_ma) / self._current_ma * 100
+                )
+            else:
+                self._current_disparity = float("nan")
+        else:
+            self._current_ma = float("nan")
+            self._current_disparity = float("nan")
+
+        # --- RSI ---
+        if self._last_close is not None:
+            change = close_price - self._last_close
+            gain = max(0.0, change)
+            loss = max(0.0, -change)
+
+            self._rsi_count += 1
+
+            if self._rsi_count <= self._rsi_period:
+                self._initial_gains.append(gain)
+                self._initial_losses.append(loss)
+
+                if self._rsi_count == self._rsi_period:
+                    self._avg_gain = sum(self._initial_gains) / self._rsi_period
+                    self._avg_loss = sum(self._initial_losses) / self._rsi_period
+                    self._current_rsi = self._calc_rsi()
+                    self._initial_gains.clear()
+                    self._initial_losses.clear()
+            else:
+                self._avg_gain = (
+                    self._avg_gain * (self._rsi_period - 1) + gain
+                ) / self._rsi_period
+                self._avg_loss = (
+                    self._avg_loss * (self._rsi_period - 1) + loss
+                ) / self._rsi_period
+                self._current_rsi = self._calc_rsi()
+
+        self._last_close = close_price
+
+    def _calc_rsi(self) -> float:
+        if self._avg_gain is None or self._avg_loss is None:
+            return float("nan")
+        if self._avg_loss == 0:
+            return 100.0 if self._avg_gain > 0 else 50.0
+        rs = self._avg_gain / self._avg_loss
+        return round(100.0 - (100.0 / (1.0 + rs)), 2)
+
+    def initialize_from_bricks(self, brick_closes: List[float]) -> None:
+        """Initialize from existing brick closes (called during warmup)."""
+        self._avg_gain = None
+        self._avg_loss = None
+        self._rsi_count = 0
+        self._initial_gains.clear()
+        self._initial_losses.clear()
+        self._last_close = None
+        self._ma_closes.clear()
+        self._current_rsi = float("nan")
+        self._current_ma = float("nan")
+        self._current_disparity = float("nan")
+
+        for close_price in brick_closes:
+            self.on_new_brick(close_price)
+
+        logging.info(
+            "Indicators from %d bricks: RSI=%.2f, MA=%.2f, Disp=%.4f",
+            len(brick_closes),
+            self._current_rsi if not math.isnan(self._current_rsi) else 0,
+            self._current_ma if not math.isnan(self._current_ma) else 0,
+            self._current_disparity if not math.isnan(self._current_disparity) else 0,
+        )
+
+    @property
+    def rsi(self) -> float:
+        return self._current_rsi
+
+    @property
+    def ma(self) -> float:
+        return self._current_ma
+
+    @property
+    def disparity(self) -> float:
+        return self._current_disparity
+
+    @property
+    def is_ready(self) -> bool:
+        return not math.isnan(self._current_rsi) and not math.isnan(self._current_ma)
 
 
 class RenkoStrategy:
@@ -28,6 +189,11 @@ class RenkoStrategy:
 
     Entry: 8 patterns (Three-Back, Two-Back, One-Back, Zigzag)
     Exit: 2-brick trailing stop from peak/trough
+
+    CRITICAL FIX (v7.1.0):
+    - Brick size calculated from EDGE (brick_high for RED, brick_low for GREEN)
+    - Edge-to-edge brick connection (no gaps)
+    - Matches broker's Renko calculation exactly
     """
 
     def __init__(self, config: Dict[str, Any]) -> None:
@@ -84,12 +250,7 @@ class RenkoStrategy:
     def initialize_from_warmup(self, bars: List[Dict[str, Any]]) -> None:
         """
         Build initial Renko bricks from warmup data.
-
-        Called ONCE at startup. After this, use on_1min_bar() for
-        incremental updates.
-
-        Args:
-            bars: List of 1-minute bar dictionaries from warmup
+        Called ONCE at startup. After this, use on_1min_bar() for incremental updates.
         """
         if not bars or len(bars) < 2:
             logging.warning("Not enough warmup bars: %d", len(bars) if bars else 0)
@@ -128,8 +289,13 @@ class RenkoStrategy:
         self._initialized = True
         self.last_processed_time = bars[-1]["timestamp"]
 
-        # Clear new brick indices from warmup (they are not "new" for signal purposes)
+        # Clear new brick indices from warmup (not "new" for signal purposes)
         self._new_brick_indices.clear()
+
+        # v7.4.0: Initialize indicators from warmup bricks
+        if self.renko_bricks:
+            brick_closes = [b["close"] for b in self.renko_bricks]
+            self.indicators.initialize_from_bricks(brick_closes)
 
         # Log summary
         if self.renko_bricks:
@@ -164,20 +330,7 @@ class RenkoStrategy:
     ) -> Optional[Dict[str, Any]]:
         """
         Process new 1-minute bar INCREMENTALLY.
-
-        Does NOT rebuild all bricks. Only checks if new bricks form
-        from the current close price against existing thresholds.
-
-        Args:
-            timestamp: Bar timestamp
-            open_price: Open price
-            high: High price
-            low: Low price
-            close: Close price
-            volume: Volume
-
-        Returns:
-            Signal dict if generated, None otherwise
+        Does NOT rebuild all bricks. Only checks if new bricks form.
         """
         timestamp = self._ensure_datetime(timestamp)
 
@@ -191,7 +344,6 @@ class RenkoStrategy:
 
         self.last_processed_time = timestamp
 
-        # If not initialized, warn (shouldn't happen after warmup)
         if not self._initialized:
             logging.warning(
                 "Strategy not initialized — call initialize_from_warmup() first"
@@ -203,6 +355,10 @@ class RenkoStrategy:
 
         # Process this close price incrementally
         self._process_close(round(close, 2), volume, timestamp)
+
+        # v7.4.0: Update indicators for any new bricks formed
+        for idx in self._new_brick_indices:
+            self.indicators.on_new_brick(self.renko_bricks[idx]["close"])
 
         # Check for signals from new bricks
         if not self._new_brick_indices:
@@ -238,6 +394,11 @@ class RenkoStrategy:
             "brick_size": self._brick_size,
             "green_threshold": self._green_cont_threshold,
             "red_threshold": self._red_cont_threshold,
+            # v7.4.0
+            "renko_rsi": self.indicators.rsi,
+            "renko_ma": self.indicators.ma,
+            "renko_disparity": self.indicators.disparity,
+            "indicators_ready": self.indicators.is_ready,
         }
 
     def has_new_bricks(self) -> bool:
@@ -252,8 +413,21 @@ class RenkoStrategy:
         """Clear new brick tracking after external processing."""
         self._new_brick_indices.clear()
 
+    def get_filter_stats(self) -> Dict[str, Any]:
+        """Get filter statistics for reporting."""
+        return self.filters.get_stats()
+
+    def log_filter_stats(self) -> None:
+        """Log filter statistics."""
+        self.filters.log_stats()
+
+    def reset_daily_stats(self) -> None:
+        """Reset daily statistics."""
+        self.filters.reset_stats()
+        self.filtered_signals.clear()
+
     # =========================================================================
-    # INCREMENTAL RENKO ENGINE
+    # INCREMENTAL RENKO ENGINE (FIXED v7.1.0)
     # =========================================================================
 
     def _update_thresholds(self) -> None:
@@ -265,8 +439,19 @@ class RenkoStrategy:
 
         Continuation: 1 brick size from edge (same direction)
         Reversal: 2 brick sizes from opposite edge (direction change)
+
+        ✅ FIX v7.1.0: Calculate brick_size from EDGE (not close)
+        - GREEN bricks: Use brick_low
+        - RED bricks: Use brick_high
+        - INITIAL: Use brick_close (no trend yet)
         """
-        self._brick_size = round(self._brick_close * self._brick_pct, 2)
+        # ✅ FIX: Edge-based brick size calculation
+        if self._trend == 1:  # GREEN trend
+            self._brick_size = round(self._brick_low * self._brick_pct, 2)
+        elif self._trend == -1:  # RED trend
+            self._brick_size = round(self._brick_high * self._brick_pct, 2)
+        else:  # INITIAL (no trend)
+            self._brick_size = round(self._brick_close * self._brick_pct, 2)
 
         # Continuation thresholds (1 brick size)
         self._green_cont_threshold = round(self._brick_high + self._brick_size, 2)
@@ -332,6 +517,10 @@ class RenkoStrategy:
 
         Each brick recalculates its own adaptive size.
 
+        ✅ FIX v7.1.0:
+        1. Calculate brick_size from EDGE (not close)
+        2. Connect bricks edge-to-edge (no gaps)
+
         Args:
             current_price: Target price
             timestamp: Brick timestamp
@@ -340,26 +529,34 @@ class RenkoStrategy:
         first_brick = True
 
         while True:
-            brick_size = round(self._brick_close * self._brick_pct, 2)
+            # ✅ FIX: Calculate brick_size from edge
+            if direction == 1:  # GREEN
+                brick_size = round(self._brick_low * self._brick_pct, 2)
+            else:  # RED
+                brick_size = round(self._brick_high * self._brick_pct, 2)
+
             if brick_size <= 0:
                 break
 
-            if direction == 1:
+            if direction == 1:  # GREEN
                 threshold = round(self._brick_high + brick_size, 2)
                 if current_price < threshold:
                     break
 
-                self._brick_close = round(self._brick_close + brick_size, 2)
-                self._brick_low = round(self._brick_close - brick_size, 2)
-                self._brick_high = round(self._brick_close, 2)
-            else:
+                # ✅ FIX: Edge-to-edge connection
+                self._brick_low = self._brick_high  # Connect to previous high
+                self._brick_high = round(self._brick_low + brick_size, 2)
+                self._brick_close = self._brick_high
+
+            else:  # RED
                 threshold = round(self._brick_low - brick_size, 2)
                 if current_price > threshold:
                     break
 
-                self._brick_close = round(self._brick_close - brick_size, 2)
-                self._brick_high = round(self._brick_close + brick_size, 2)
-                self._brick_low = round(self._brick_close, 2)
+                # ✅ FIX: Edge-to-edge connection
+                self._brick_high = self._brick_low  # Connect to previous low
+                self._brick_low = round(self._brick_high - brick_size, 2)
+                self._brick_close = self._brick_low
 
             self._trend = direction
             self._consecutive += 1
@@ -391,8 +588,10 @@ class RenkoStrategy:
         """
         Add reversal bricks (direction change) one at a time.
 
-        CRITICAL FIX: Start from opposite edge to ensure proper brick connection.
-        Apply 2-brick rule: plot (actual_bricks - 1), minimum 1.
+        ✅ FIX v7.1.0:
+        1. Start from opposite edge to ensure proper brick connection
+        2. Calculate brick_size from reversal_start (edge)
+        3. Apply 2-brick rule: plot (actual_bricks - 1), minimum 1
 
         Args:
             current_price: Target price
@@ -402,7 +601,7 @@ class RenkoStrategy:
         first_brick = True
         bricks_added = 0
 
-        # CRITICAL FIX: Start from opposite edge of previous brick
+        # Start from opposite edge of previous brick
         if new_direction == 1:
             # GREEN reversal: Start from previous RED brick's LOW
             reversal_start = self._brick_low
@@ -412,7 +611,7 @@ class RenkoStrategy:
             reversal_start = self._brick_high
             price_movement = reversal_start - current_price
 
-        # Calculate how many bricks the price actually moved
+        # ✅ FIX: Calculate brick_size from reversal_start (edge)
         brick_size = round(reversal_start * self._brick_pct, 2)
         if brick_size <= 0:
             brick_size = self._brick_size  # Fallback to last known size
@@ -426,22 +625,28 @@ class RenkoStrategy:
         self._brick_close = reversal_start
 
         for _ in range(bricks_to_plot):
-            # Recalculate brick size for current close (adaptive)
-            brick_size = round(self._brick_close * self._brick_pct, 2)
+            # ✅ FIX: Recalculate brick_size from current edge (adaptive)
+            if new_direction == 1:  # GREEN
+                brick_size = round(self._brick_close * self._brick_pct, 2)
+            else:  # RED
+                brick_size = round(self._brick_close * self._brick_pct, 2)
+
             if brick_size <= 0:
                 break
 
             if new_direction == 1:
                 # GREEN brick: close moves UP
-                self._brick_close = round(self._brick_close + brick_size, 2)
-                self._brick_low = round(self._brick_close - brick_size, 2)
-                self._brick_high = self._brick_close
+                # ✅ FIX: Edge-to-edge connection
+                self._brick_low = self._brick_close
+                self._brick_high = round(self._brick_low + brick_size, 2)
+                self._brick_close = self._brick_high
 
             else:
                 # RED brick: close moves DOWN
-                self._brick_close = round(self._brick_close - brick_size, 2)
-                self._brick_high = round(self._brick_close + brick_size, 2)
-                self._brick_low = self._brick_close
+                # ✅ FIX: Edge-to-edge connection
+                self._brick_high = self._brick_close
+                self._brick_low = round(self._brick_high - brick_size, 2)
+                self._brick_close = self._brick_low
 
             self._trend = new_direction
 
@@ -476,14 +681,14 @@ class RenkoStrategy:
             if brick_size > 0:
                 if new_direction == 1:
                     # GREEN brick
-                    self._brick_close = round(self._brick_close + brick_size, 2)
-                    self._brick_low = round(self._brick_close - brick_size, 2)
-                    self._brick_high = self._brick_close
+                    self._brick_low = self._brick_close
+                    self._brick_high = round(self._brick_low + brick_size, 2)
+                    self._brick_close = self._brick_high
                 else:
                     # RED brick
-                    self._brick_close = round(self._brick_close - brick_size, 2)
-                    self._brick_high = round(self._brick_close + brick_size, 2)
-                    self._brick_low = self._brick_close
+                    self._brick_high = self._brick_close
+                    self._brick_low = round(self._brick_high - brick_size, 2)
+                    self._brick_close = self._brick_low
 
                 self._trend = new_direction
                 self._consecutive = 1
@@ -536,7 +741,7 @@ class RenkoStrategy:
         return None
 
     def _check_pattern_entry(self, idx: int) -> Optional[Dict[str, Any]]:
-        """Check for pattern-based entry at given brick index."""
+        """Check for pattern-based entry at given brick index (v7.4.0 with filters)."""
         pattern = self._detect_pattern(idx)
         if not pattern:
             return None
@@ -545,7 +750,7 @@ class RenkoStrategy:
         brick_time = current["time"]
         brick_price = current["close"]
 
-        # Log pattern
+        # Log pattern (before filtering)
         self.detected_patterns.append(
             {
                 "pattern_name": pattern["pattern_name"],
@@ -557,13 +762,19 @@ class RenkoStrategy:
         )
 
         if STRATEGY.get("log_all_patterns", True):
+            rsi_val = self.indicators.rsi
+            ma_val = self.indicators.ma
+            disp_val = self.indicators.disparity
             logging.info(
-                "PATTERN: %s (%s) @ %s | Price: %.2f | Brick: %d",
+                "PATTERN: %s (%s) @ %s | Price: %.2f | Brick: %d | "
+                "RSI: %.2f | Disp: %.4f",
                 pattern["pattern_name"],
                 pattern["pattern_type"],
                 brick_time.strftime("%H:%M:%S"),
                 brick_price,
                 idx,
+                rsi_val if not math.isnan(rsi_val) else 0,
+                disp_val if not math.isnan(disp_val) else 0,
             )
 
         # Check entry time
@@ -571,14 +782,56 @@ class RenkoStrategy:
             logging.info("Pattern NOT traded: before entry time")
             return None
 
+        # v7.4.0: Apply filters
+        side = pattern["side"]
+        entry_hour = brick_time.hour
+
+        should_trade, filter_reason = self.filters.should_take_trade(
+            pattern_name=pattern["pattern_name"],
+            side=side,
+            renko_rsi=self.indicators.rsi,
+            disparity=self.indicators.disparity,
+            entry_hour=entry_hour,
+        )
+
+        if not should_trade:
+            self.filtered_signals.append(
+                {
+                    "pattern_name": pattern["pattern_name"],
+                    "pattern_type": pattern["pattern_type"],
+                    "side": "LONG" if side == 1 else "SHORT",
+                    "time": brick_time,
+                    "price": brick_price,
+                    "rsi": self.indicators.rsi,
+                    "disparity": self.indicators.disparity,
+                    "filter_reason": filter_reason,
+                }
+            )
+            return None
+
+        # Signal passed all filters
+        logging.info(
+            "✅ SIGNAL PASSED: %s %s @ %.2f | RSI=%.2f Disp=%.4f",
+            "LONG" if side == 1 else "SHORT",
+            pattern["pattern_name"],
+            brick_price,
+            self.indicators.rsi if not math.isnan(self.indicators.rsi) else 0,
+            self.indicators.disparity
+            if not math.isnan(self.indicators.disparity)
+            else 0,
+        )
+
         return {
-            "action": "LONG" if pattern["side"] == 1 else "SHORT",
+            "action": "LONG" if side == 1 else "SHORT",
             "timestamp": brick_time,
             "price": brick_price,
             "pattern_name": pattern["pattern_name"],
             "pattern_type": pattern["pattern_type"],
             "entry_type": "pattern",
             "renko_direction": current["type"],
+            "renko_rsi": self.indicators.rsi,
+            "renko_ma": self.indicators.ma,
+            "renko_disparity": self.indicators.disparity,
         }
 
     def _detect_pattern(self, brick_idx: int) -> Optional[Dict[str, Any]]:
@@ -721,7 +974,7 @@ class RenkoStrategy:
         return datetime.now(IST)
 
     def debug_renko_thresholds(self) -> None:
-        """Print current Renko state and thresholds for debugging."""
+        """Print current Renko state, thresholds, and indicators."""
         if not self.renko_bricks:
             print("❌ No bricks available")
             return
@@ -735,7 +988,7 @@ class RenkoStrategy:
         )
 
         print(f"\n{'=' * 80}")
-        print("RENKO STATE (Incremental)")
+        print("RENKO STATE (v7.4.0)")
         print(f"{'=' * 80}")
         print(f"  Trend:       {trend_str}")
         print(f"  Brick Close: {self._brick_close:,.2f}")
@@ -747,21 +1000,205 @@ class RenkoStrategy:
         print(f"  Acc Volume:  {self._acc_vol:.0f}")
         print()
         print("THRESHOLDS:")
-        print(
-            f"  🟢 GREEN (continuation/reversal): >= {self._green_cont_threshold:,.2f}"
-        )
-        print(f"  🔴 RED   (continuation/reversal): <= {self._red_cont_threshold:,.2f}")
+        print(f"  🟢 GREEN (continuation): >= {self._green_cont_threshold:,.2f}")
+        print(f"  🔴 RED   (continuation): <= {self._red_cont_threshold:,.2f}")
 
         if self._trend == 1:
-            print("\n  Current trend is GREEN:")
-            print(f"    Continue GREEN if price >= {self._green_cont_threshold:,.2f}")
-            print(f"    Reverse to RED if price <= {self._red_cont_threshold:,.2f}")
+            print(f"  Continue GREEN if price >= {self._green_cont_threshold:,.2f}")
+            print(f"  Reverse to RED if price <= {self._green_reversal_threshold:,.2f}")
         elif self._trend == -1:
-            print("\n  Current trend is RED:")
-            print(f"    Continue RED if price <= {self._red_cont_threshold:,.2f}")
-            print(f"    Reverse to GREEN if price >= {self._green_cont_threshold:,.2f}")
+            print(f"  Continue RED if price <= {self._red_cont_threshold:,.2f}")
+            print(f"  Reverse to GREEN if price >= {self._red_reversal_threshold:,.2f}")
+
+        # v7.4.0: Indicators
+        rsi_val = self.indicators.rsi
+        ma_val = self.indicators.ma
+        disp_val = self.indicators.disparity
+
+        print()
+        print("INDICATORS:")
+        print(f"  RSI(14): {rsi_val:.2f if not math.isnan(rsi_val) else 'N/A'}")
+        print(f"  MA(40):  {ma_val:,.2f if not math.isnan(ma_val) else 'N/A'}")
+        print(
+            f"  Disp:    {disp_val:.4f}%"
+            if not math.isnan(disp_val)
+            else "  Disp:    N/A"
+        )
+        print(f"  Ready:   {'YES' if self.indicators.is_ready else 'NO (warming up)'}")
+
+        # v7.4.0: Filter stats
+        stats = self.filters.get_stats()
+        if stats["total_signals"] > 0:
+            print()
+            print("FILTERS:")
+            print(
+                f"  Signals: {stats['total_signals']} | "
+                f"Passed: {stats['passed']} | "
+                f"Filtered: {stats['total_filtered']}"
+            )
+            print(
+                f"  F1:{stats['filtered_f1']} "
+                f"F2:{stats['filtered_f2']} "
+                f"F3:{stats['filtered_f3']} "
+                f"F4:{stats['filtered_f4']}"
+            )
 
         print(f"{'=' * 80}\n")
 
 
-__all__ = ["RenkoStrategy"]
+# =============================================================================
+# FILTER ENGINE (v7.4.0)
+# =============================================================================
+
+
+class FilterEngine:
+    """
+    Entry filters: F1 MA Alignment, F2 RSI Alignment,
+    F3 No Zigzag Short, F4 No Short Hour 15.
+    """
+
+    def __init__(self, config: Dict[str, Any]) -> None:
+        self._enabled = config.get("enabled", True)
+        self._f1 = config.get("f1_ma_alignment", {})
+        self._f2 = config.get("f2_rsi_alignment", {})
+        self._f3 = config.get("f3_no_zigzag_short", {})
+        self._f4 = config.get("f4_no_short_hour15", {})
+        self._log_filtered = config.get("log_filtered_trades", True)
+
+        self._stats = {
+            "total_signals": 0,
+            "passed": 0,
+            "filtered_f1": 0,
+            "filtered_f2": 0,
+            "filtered_f3": 0,
+            "filtered_f4": 0,
+        }
+
+        active = []
+        if self._f1.get("enabled", True):
+            active.append("F1:MA")
+        if self._f2.get("enabled", True):
+            active.append("F2:RSI")
+        if self._f3.get("enabled", True):
+            active.append("F3:NoZigShort")
+        if self._f4.get("enabled", True):
+            active.append("F4:NoH15Short")
+
+        logging.info(
+            "FilterEngine v7.4.0: %s | [%s]",
+            "ENABLED" if self._enabled else "DISABLED",
+            ", ".join(active) if active else "NONE",
+        )
+
+    def should_take_trade(
+        self,
+        pattern_name: str,
+        side: int,
+        renko_rsi: float,
+        disparity: float,
+        entry_hour: int,
+    ) -> tuple:
+        """
+        Check all filters. Returns (should_trade, filter_reason).
+
+        Args:
+            pattern_name: e.g. "One-Back", "Zigzag"
+            side: 1=LONG, -1=SHORT
+            renko_rsi: Renko RSI (NaN if unavailable)
+            disparity: (price-MA)/MA*100 (NaN if unavailable)
+            entry_hour: 0-23
+        """
+        self._stats["total_signals"] += 1
+
+        if not self._enabled:
+            self._stats["passed"] += 1
+            return True, ""
+
+        # F1: MA Alignment
+        if self._f1.get("enabled", True) and not math.isnan(disparity):
+            if side == 1 and disparity < 0:
+                self._stats["filtered_f1"] += 1
+                reason = f"F1_MA: Long below MA (disp={disparity:.4f})"
+                if self._log_filtered:
+                    logging.info("🚫 FILTERED: %s | %s", pattern_name, reason)
+                return False, reason
+            if side == -1 and disparity > 0:
+                self._stats["filtered_f1"] += 1
+                reason = f"F1_MA: Short above MA (disp={disparity:.4f})"
+                if self._log_filtered:
+                    logging.info("🚫 FILTERED: %s | %s", pattern_name, reason)
+                return False, reason
+
+        # F2: RSI Alignment
+        if self._f2.get("enabled", True) and not math.isnan(renko_rsi):
+            threshold = self._f2.get("rsi_threshold", 50.0)
+            if side == 1 and renko_rsi < threshold:
+                self._stats["filtered_f2"] += 1
+                reason = f"F2_RSI: Long RSI={renko_rsi:.2f} < {threshold}"
+                if self._log_filtered:
+                    logging.info("🚫 FILTERED: %s | %s", pattern_name, reason)
+                return False, reason
+            if side == -1 and renko_rsi > threshold:
+                self._stats["filtered_f2"] += 1
+                reason = f"F2_RSI: Short RSI={renko_rsi:.2f} > {threshold}"
+                if self._log_filtered:
+                    logging.info("🚫 FILTERED: %s | %s", pattern_name, reason)
+                return False, reason
+
+        # F3: No Zigzag Short
+        if self._f3.get("enabled", True):
+            if pattern_name == "Zigzag" and side == -1:
+                self._stats["filtered_f3"] += 1
+                reason = "F3_ZS: Zigzag Short skipped"
+                if self._log_filtered:
+                    logging.info("🚫 FILTERED: %s | %s", pattern_name, reason)
+                return False, reason
+
+        # F4: No Short at Hour 15
+        if self._f4.get("enabled", True):
+            hour_limit = self._f4.get("hour_threshold", 15)
+            if side == -1 and entry_hour >= hour_limit:
+                self._stats["filtered_f4"] += 1
+                reason = f"F4_H15S: Short at hour {entry_hour}"
+                if self._log_filtered:
+                    logging.info("🚫 FILTERED: %s | %s", pattern_name, reason)
+                return False, reason
+
+        self._stats["passed"] += 1
+        return True, ""
+
+    def get_stats(self) -> Dict[str, Any]:
+        total = self._stats["total_signals"]
+        passed = self._stats["passed"]
+        filtered = total - passed
+        return {
+            **self._stats,
+            "total_filtered": filtered,
+            "pass_rate": (passed / total * 100) if total > 0 else 0,
+            "filter_rate": (filtered / total * 100) if total > 0 else 0,
+        }
+
+    def log_stats(self) -> None:
+        stats = self.get_stats()
+        if stats["total_signals"] == 0:
+            return
+        logging.info(
+            "📊 FILTER STATS: %d signals | %d passed (%.1f%%) | "
+            "%d filtered (%.1f%%) | F1:%d F2:%d F3:%d F4:%d",
+            stats["total_signals"],
+            stats["passed"],
+            stats["pass_rate"],
+            stats["total_filtered"],
+            stats["filter_rate"],
+            stats["filtered_f1"],
+            stats["filtered_f2"],
+            stats["filtered_f3"],
+            stats["filtered_f4"],
+        )
+
+    def reset_stats(self) -> None:
+        for key in self._stats:
+            self._stats[key] = 0
+
+
+__all__ = ["RenkoStrategy", "FilterEngine", "RenkoIndicators"]

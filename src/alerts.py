@@ -747,11 +747,8 @@ def print_startup(
     print(
         f"   Trading Hours: {config.get('trading_start', '09:15')} - {config.get('trading_end', '15:30')}"
     )
-    print(f"   Signal Timeframe: {config.get('signal_timeframe', '15min')}")
-    print(
-        f"   Strategy: ADX({config.get('adx_min', 20)}-{config.get('adx_max', 70)}) + "
-        f"RSI(>{config.get('rsi_long_thresh', 55)}/<{config.get('rsi_short_thresh', 45)})"
-    )
+    print(f"    Brick Size: {config.get('brick_size', '0.04%')} | Reversal Bricks: {config.get('reversal_bricks', 2)}")
+    
     print(f"{'=' * 60}")
 
 

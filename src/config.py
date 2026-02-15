@@ -428,6 +428,31 @@ STRATEGY: Dict[str, Any] = {
     "hedge_strike_offset": 100,  # OTM offset for hedge (2 strikes away)
 }
 
+# =============================================================================
+# FILTER CONFIGURATION (v7.4.0)
+# =============================================================================
+
+FILTERS: Dict[str, Any] = {
+    "enabled": True,
+    "f1_ma_alignment": {
+        "enabled": True,
+        "ma_period": 40,
+    },
+    "f2_rsi_alignment": {
+        "enabled": True,
+        "rsi_period": 14,
+        "rsi_threshold": 50.0,
+    },
+    "f3_no_zigzag_short": {
+        "enabled": True,
+    },
+    "f4_no_short_hour15": {
+        "enabled": True,
+        "hour_threshold": 15,
+    },
+    "log_filtered_trades": True,
+    "log_filter_stats": True,
+}
 
 # =============================================================================
 # DIRECTORY SETUP
@@ -544,6 +569,7 @@ def print_config_summary() -> None:
     print(f"Patterns: {'Enabled' if PATTERNS['enabled'] else 'Disabled'}")
     print(f"Position: {STRATEGY['initial_lots']}-{STRATEGY['max_lots']} lots")
     print(f"Risk: Max Loss ₹{STRATEGY['max_daily_loss']:,}")
+    print(f"Filters v7.4.0: {'Enabled' if FILTERS.get('enabled') else 'Disabled'}")
     print(f"Trading Hours: {STRATEGY['trading_start']}-{STRATEGY['trading_end']}")
     print(f"Entry Start: {STRATEGY['entry_start_time']}")
     print(sep)
@@ -736,6 +762,7 @@ __all__ = [
     "TRADING_MODE",
     "STRATEGY",
     "PATTERNS",
+    "FILTERS",
     "create_directories",
     "validate_config",
     "print_config_summary",

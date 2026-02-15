@@ -1778,66 +1778,78 @@ class Trader:
             logging.info("=" * 80)
             logging.info("🔄 Verifying position with broker...")
             logging.info("=" * 80)
-            
+
             try:
                 # Get broker positions
                 response = self.order_manager.fyers.positions()
-                
+
                 if response and response.get("code") == 200:
                     net_positions = response.get("netPositions", [])
-                    
+
                     # Build dict of broker symbols and quantities
                     broker_symbols = {
-                        pos.get("symbol"): pos.get("netQty", 0) 
-                        for pos in net_positions 
+                        pos.get("symbol"): pos.get("netQty", 0)
+                        for pos in net_positions
                         if pos.get("netQty", 0) != 0
                     }
-                    
+
                     # Check if our BUY and SELL legs exist at broker
                     buy_exists = (
-                        self.buy_symbol in broker_symbols 
+                        self.buy_symbol in broker_symbols
                         and broker_symbols[self.buy_symbol] > 0
                     )
                     sell_exists = (
-                        self.sell_symbol in broker_symbols 
+                        self.sell_symbol in broker_symbols
                         and broker_symbols[self.sell_symbol] < 0
                     )
-                    
+
                     if buy_exists and sell_exists:
                         logging.info("✅ Position verified at broker")
-                        
+
                         # Check for hedge
                         if self.hedge_symbol and self.hedge_symbol in broker_symbols:
                             if broker_symbols[self.hedge_symbol] > 0:
                                 logging.info("✅ Hedge verified at broker")
                             else:
-                                logging.warning("⚠️ Hedge not found at broker - clearing hedge state")
+                                logging.warning(
+                                    "⚠️ Hedge not found at broker - clearing hedge state"
+                                )
                                 self.hedge_symbol = None
                                 self.hedge_entry_price = None
                                 self.hedge_bought = False
                                 self.hedge_exit_pending = False
-                        
+
                         # Update current prices
                         self._update_position_ltp()
-                        
+
                         # Display recovered position
                         direction = "LONG" if self.position == 1 else "SHORT"
                         print(f"\n{'=' * 80}")
-                        print(f"🔄 RECOVERED {direction} POSITION ({self.current_lots} lots)")
-                        print(f"   📗 BUY:  {self.buy_symbol} @ ₹{self.buy_entry_price:.2f}")
-                        print(f"   📕 SELL: {self.sell_symbol} @ ₹{self.sell_entry_price:.2f}")
-                        
+                        print(
+                            f"🔄 RECOVERED {direction} POSITION ({self.current_lots} lots)"
+                        )
+                        print(
+                            f"   📗 BUY:  {self.buy_symbol} @ ₹{self.buy_entry_price:.2f}"
+                        )
+                        print(
+                            f"   📕 SELL: {self.sell_symbol} @ ₹{self.sell_entry_price:.2f}"
+                        )
+
                         if self.hedge_bought and self.hedge_symbol:
-                            print(f"   🛡️ HEDGE: {self.hedge_symbol} @ ₹{self.hedge_entry_price:.2f}")
+                            print(
+                                f"   🛡️ HEDGE: {self.hedge_symbol} @ ₹{self.hedge_entry_price:.2f}"
+                            )
                             if self.hedge_exit_pending:
                                 print(f"   ⏰ Hedge exit pending at 9:16 AM")
-                        
+
                         print(f"{'=' * 80}\n")
                     else:
-                        logging.error("❌ Position mismatch with broker - clearing state")
+                        logging.error(
+                            "❌ Position mismatch with broker - clearing state"
+                        )
                         logging.error("   BUY leg found: %s", buy_exists)
                         logging.error("   SELL leg found: %s", sell_exists)
-                        
+
                         # Clear position state
                         self.position = 0
                         self.entry_info = None
@@ -1853,16 +1865,16 @@ class Trader:
                         self.hedge_bought = False
                         self.hedge_exit_pending = False
                         self.current_lots = STRATEGY["initial_lots"]
-                        
+
                         # Sync with strategy
                         self.strategy.position = 0
                         self.strategy.entry_info = None
-                        
+
                         # Save cleared state
                         self._save_state()
                 else:
                     logging.warning("⚠️ Could not fetch broker positions")
-            
+
             except Exception as exc:
                 logging.error("❌ Broker verification failed: %s", exc)
 
@@ -2510,9 +2522,7 @@ class Trader:
             self._handle_new_bricks(current_time)
 
         # Check if exit signal was generated
-        exit_signal_generated = (
-            signal_result and signal_result.get("action") == "EXIT"
-        )
+        exit_signal_generated = signal_result and signal_result.get("action") == "EXIT"
 
         # SMART HEDGE EXIT LOGIC:
         # If exit signal generated → Close complete trade (main + hedge together)
@@ -2876,13 +2886,13 @@ class Trader:
             self.sell_symbol = None
             self.buy_entry_price = None
             self.sell_entry_price = None
-            
+
             # Only clear hedge state if NOT pending next-day exit
             if not self.hedge_exit_pending:
                 self.hedge_symbol = None
                 self.hedge_entry_price = None
                 self.hedge_bought = False
-            
+
             self.current_lots = STRATEGY["initial_lots"]
 
             # Sync with strategy
@@ -3121,7 +3131,9 @@ class Trader:
                     print(f"   Entry: ₹{self.hedge_entry_price:.2f}")
                     print(f"   Exit: ₹{filled_price:.2f}")
                     print(f"   PnL: ₹{hedge_pnl:,.0f}")
-                    print(f"   Main Position: {'STILL OPEN' if self.position != 0 else 'CLOSED'}")
+                    print(
+                        f"   Main Position: {'STILL OPEN' if self.position != 0 else 'CLOSED'}"
+                    )
                     print(f"{'=' * 80}\n")
 
                 else:
@@ -3143,7 +3155,7 @@ class Trader:
 
         except Exception as exc:
             logging.error("Failed to exit hedge: %s", exc, exc_info=True)
-        
+
         finally:
             # CRITICAL: ALWAYS clear hedge state after exit (even on error)
             self.hedge_symbol = None
@@ -3152,7 +3164,7 @@ class Trader:
             self.hedge_exit_pending = False
 
             self._save_state()
-            
+
             logging.info("✅ Hedge state cleared after exit")
 
     def _force_exit(self, current_time: datetime, reason: str):
@@ -3189,12 +3201,14 @@ class Trader:
         try:
             # Check if this is a same-day exit or next-day scenario
             should_exit_hedge_now = False
-            
+
             if self.hedge_bought and self.hedge_symbol:
                 if not self.hedge_exit_pending:
                     # Hedge was bought earlier (not at 3:25 PM) - exit it now
                     should_exit_hedge_now = True
-                    logging.info("🛡️ Exiting hedge with main position (same-day scenario)")
+                    logging.info(
+                        "🛡️ Exiting hedge with main position (same-day scenario)"
+                    )
                 elif "expiry" in reason.lower() or "emergency" in reason.lower():
                     # Emergency/expiry exit - close everything
                     should_exit_hedge_now = True
@@ -3202,9 +3216,11 @@ class Trader:
                 else:
                     # Keep hedge for next-day exit at 9:16 AM
                     logging.info("🛡️ Keeping hedge for next-day exit at 9:16 AM")
-            
+
             if should_exit_hedge_now:
-                self._exit_hedge_only(current_time, f"Force exit with main position: {reason}")
+                self._exit_hedge_only(
+                    current_time, f"Force exit with main position: {reason}"
+                )
 
             # Exit main position
             trade_result = self.executor.execute_exit(
@@ -3266,6 +3282,13 @@ class Trader:
                 print(f"   Brokerage: ₹{self.broker_brokerage_today:,.2f}")
             print(f"{'=' * 80}\n")
 
+        # v7.4.0: Log filter statistics at end of day
+        try:
+            if hasattr(self, "strategy"):
+                self.strategy.log_filter_stats()
+        except Exception as exc:
+            logging.warning("Failed to log filter stats: %s", exc)
+
         # Generate and send daily report
         trades = self.trades_today or load_daily_trades()
         if trades:
@@ -3318,22 +3341,24 @@ class Trader:
         try:
             cutoff_date = get_current_date() - timedelta(days=7)
             deleted = 0
-            
+
             for state_file in STATE_DIR.glob("state_*.json"):
                 try:
                     date_str = state_file.stem.replace("state_", "")
                     file_date = datetime.strptime(date_str, "%Y%m%d").date()
-                    
+
                     if file_date < cutoff_date:
                         state_file.unlink()
                         deleted += 1
-                
+
                 except (ValueError, OSError):
                     pass
-            
+
             if deleted > 0:
-                logging.info("🧹 Cleaned up %d old state files (older than 7 days)", deleted)
-        
+                logging.info(
+                    "🧹 Cleaned up %d old state files (older than 7 days)", deleted
+                )
+
         except Exception as exc:
             logging.warning("Failed to cleanup old state files: %s", exc)
 
