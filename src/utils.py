@@ -557,6 +557,262 @@ def get_current_date() -> date:
 
 
 # ============================================================================
+# SYNTHETIC FUTURE SYMBOLS FROM OPTIONCHAIN (v3 API)
+# ============================================================================
+
+
+def get_synthetic_future_symbols_from_optionchain_v3(
+    nifty_price: float, signal: str, fyers_client, expiry_str: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """
+    Get synthetic future symbols from Fyers API v3 optionchain.
+
+    Extracts the 'symbol' field directly from optionchain response.
+    Handles both weekly and monthly expiries automatically.
+
+    Based on Fyers API v3 documentation response structure.
+
+    Args:
+        nifty_price: Current Nifty price
+        signal: "LONG" or "SHORT"
+        fyers_client: Authenticated Fyers API v3 client
+        expiry_str: Optional expiry date (DD-MMM-YYYY format)
+
+    Returns:
+        Dict with:
+        - buy_symbol: Contract symbol to buy
+        - sell_symbol: Contract symbol to sell
+        - atm_strike: ATM strike price
+        - buy_type: "CE" or "PE"
+        - sell_type: "CE" or "PE"
+        - buy_ltp: Buy leg LTP from optionchain
+        - sell_ltp: Sell leg LTP from optionchain
+
+        Returns None if fetch fails
+
+    Example:
+        symbols = get_synthetic_future_symbols_from_optionchain_v3(
+            nifty_price=25900,
+            signal="LONG",
+            fyers_client=fyers_client,
+            expiry_str="17-Feb-2026"
+        )
+        # Returns:
+        # {
+        #     "buy_symbol": "NSE:NIFTY26FEB25900CE",
+        #     "sell_symbol": "NSE:NIFTY26FEB25900PE",
+        #     "atm_strike": 25900,
+        #     "buy_type": "CE",
+        #     "sell_type": "PE",
+        #     "buy_ltp": 97.2,
+        #     "sell_ltp": 111.85
+        # }
+    """
+    if nifty_price <= 0:
+        raise ValueError(f"Invalid Nifty price: {nifty_price}")
+
+    if signal not in ("LONG", "SHORT"):
+        raise ValueError(f"Invalid signal: {signal}. Must be 'LONG' or 'SHORT'")
+
+    if not fyers_client:
+        logging.error("❌ Fyers client not available")
+        return None
+
+    # Determine target expiry date
+    if expiry_str:
+        try:
+            target_expiry_date = parse_expiry_date(expiry_str)
+            if target_expiry_date <= date.today():
+                target_expiry_date = calculate_next_expiry()
+                logging.info("Expiry rolled over to: %s", target_expiry_date)
+        except ValueError:
+            logging.warning("Invalid expiry '%s', using next expiry", expiry_str)
+            target_expiry_date = calculate_next_expiry()
+    else:
+        target_expiry_date = calculate_next_expiry()
+
+    # Calculate ATM strike
+    atm_strike = calculate_atm_strike(nifty_price)
+
+    logging.info(
+        "🎯 Fetching symbols: Expiry=%s, ATM Strike=%d, Signal=%s",
+        target_expiry_date.strftime("%d-%b-%Y"),
+        atm_strike,
+        signal,
+    )
+
+    try:
+        # Step 1: Fetch optionchain without timestamp to get available expiries
+        logging.debug("📊 Fetching available expiries from optionchain...")
+
+        response = fyers_client.optionchain(
+            {"symbol": "NSE:NIFTY50-INDEX", "strikecount": 1, "timestamp": ""}
+        )
+
+        if not response or response.get("code") != 200:
+            logging.error("❌ Failed to fetch expiry data: %s", response)
+            return None
+
+        # Step 2: Find the timestamp for our target expiry
+        expiry_data_list = response.get("data", {}).get("expiryData", [])
+
+        if not expiry_data_list:
+            logging.error("❌ No expiry data in response")
+            return None
+
+        target_timestamp = None
+
+        for expiry_item in expiry_data_list:
+            exp_date_str = expiry_item.get("date")  # Format: "25-04-2024"
+
+            if not exp_date_str:
+                continue
+
+            try:
+                # Parse date from Fyers format (DD-MM-YYYY)
+                exp_date = datetime.strptime(exp_date_str, "%d-%m-%Y").date()
+
+                if exp_date == target_expiry_date:
+                    target_timestamp = expiry_item.get("expiry")
+                    logging.info(
+                        "✅ Found target expiry: %s (timestamp: %s)",
+                        exp_date_str,
+                        target_timestamp,
+                    )
+                    break
+            except ValueError as e:
+                logging.debug("Failed to parse expiry date '%s': %s", exp_date_str, e)
+                continue
+
+        if not target_timestamp:
+            logging.error(
+                "❌ Target expiry %s not found in available expiries",
+                target_expiry_date.strftime("%d-%b-%Y"),
+            )
+            available = [e.get("date") for e in expiry_data_list]
+            logging.info("Available expiries: %s", available)
+            return None
+
+        # Step 3: Fetch optionchain for the target expiry with timestamp
+        logging.debug(
+            "📊 Fetching optionchain for expiry timestamp: %s", target_timestamp
+        )
+
+        response = fyers_client.optionchain(
+            {
+                "symbol": "NSE:NIFTY50-INDEX",
+                "strikecount": 10,
+                "timestamp": str(target_timestamp),
+            }
+        )
+
+        if not response or response.get("code") != 200:
+            logging.error("❌ Failed to fetch optionchain: %s", response)
+            return None
+
+        # Step 4: Extract CE and PE symbols for ATM strike from optionchain
+        options_chain = response.get("data", {}).get("optionsChain", [])
+
+        if not options_chain:
+            logging.error("❌ No options in chain for expiry")
+            return None
+
+        ce_symbol = None
+        pe_symbol = None
+        ce_ltp = None
+        pe_ltp = None
+
+        logging.debug(
+            "🔍 Searching for ATM strike %d in %d options",
+            atm_strike,
+            len(options_chain),
+        )
+
+        for option in options_chain:
+            strike = option.get("strike_price", 0)
+            opt_type = option.get("option_type", "")
+            symbol = option.get("symbol", "")
+            ltp = option.get("ltp", 0)
+
+            # Log nearby strikes for debugging
+            if strike in [atm_strike - 50, atm_strike, atm_strike + 50]:
+                logging.debug(
+                    "  Strike: %d, Type: %s, Symbol: %s, LTP: %.2f",
+                    strike,
+                    opt_type,
+                    symbol,
+                    ltp,
+                )
+
+            if strike == atm_strike:
+                if opt_type == "CE":
+                    ce_symbol = symbol
+                    ce_ltp = ltp
+                    logging.debug("✅ Found CE: %s @ ₹%.2f", symbol, ltp)
+                elif opt_type == "PE":
+                    pe_symbol = symbol
+                    pe_ltp = ltp
+                    logging.debug("✅ Found PE: %s @ ₹%.2f", symbol, ltp)
+
+            if ce_symbol and pe_symbol:
+                break
+
+        if not ce_symbol or not pe_symbol:
+            available_strikes = sorted(
+                set(o.get("strike_price") for o in options_chain)
+            )
+            logging.error(
+                "❌ Could not find CE/PE symbols for strike %d",
+                atm_strike,
+            )
+            logging.info("Available strikes: %s", available_strikes)
+            return None
+
+        # Step 5: Determine buy/sell based on signal
+        if signal == "LONG":
+            buy_symbol = ce_symbol
+            sell_symbol = pe_symbol
+            buy_type = "CE"
+            sell_type = "PE"
+            buy_ltp = ce_ltp
+            sell_ltp = pe_ltp
+        else:  # SHORT
+            buy_symbol = pe_symbol
+            sell_symbol = ce_symbol
+            buy_type = "PE"
+            sell_type = "CE"
+            buy_ltp = pe_ltp
+            sell_ltp = ce_ltp
+
+        logging.info(
+            "✅ Synthetic %s from optionchain: Buy %s @ ₹%.2f | Sell %s @ ₹%.2f",
+            signal,
+            buy_symbol,
+            buy_ltp,
+            sell_symbol,
+            sell_ltp,
+        )
+
+        return {
+            "buy_symbol": buy_symbol,
+            "sell_symbol": sell_symbol,
+            "atm_strike": atm_strike,
+            "buy_type": buy_type,
+            "sell_type": sell_type,
+            "buy_ltp": buy_ltp,
+            "sell_ltp": sell_ltp,
+        }
+
+    except Exception as exc:
+        logging.error(
+            "❌ Error fetching symbols from optionchain: %s",
+            exc,
+            exc_info=True,
+        )
+        return None
+
+
+# ============================================================================
 # EXPORTS
 # ============================================================================
 
@@ -589,7 +845,8 @@ __all__ = [
     "STRIKE_INTERVAL",
     "DEFAULT_ITM_PCT",
     "HOLIDAY_FILE",
-    # Synthetic futures (ADD THESE)
+    # Synthetic futures
     "calculate_atm_strike",
     "get_synthetic_future_symbols",
+    "get_synthetic_future_symbols_from_optionchain_v3",
 ]

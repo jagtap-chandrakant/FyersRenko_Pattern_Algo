@@ -287,10 +287,13 @@ def format_trade_exit(trade: Dict[str, Any]) -> str:
 
 
 def format_daily_summary(report: Dict[str, Any]) -> str:
-    """Format daily summary report with pattern-level breakdown and broker data."""
+    """Format daily summary report with open position support."""
     initial_capital = report.get("initial_capital", CAPITAL_PER_LOT * 2)
     final_equity = report.get("final_equity", initial_capital)
-    total_pnl = report.get("total_pnL", 0)
+    realized_pnl = report.get("realized_pnl", report.get("total_pnL", 0))
+    unrealized_pnl = report.get("unrealized_pnl", 0)
+    total_pnl = report.get("total_pnl", realized_pnl + unrealized_pnl)
+
     return_pct = (total_pnl / initial_capital * 100) if initial_capital > 0 else 0
 
     # Build pattern breakdown
@@ -299,19 +302,58 @@ def format_daily_summary(report: Dict[str, Any]) -> str:
     # Build capital section with broker data
     capital_section = _format_capital_section(report)
 
+    # Build open position section
+    open_position_section = _format_open_position_section(report)
+
     return (
         f"<b>📊 DAILY SUMMARY | {report.get('date', 'Today')}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>📈 PERFORMANCE</b>\n"
-        f"Trades: {report.get('total_trades', 0)} | "
-        f"Win: {report.get('win_rate', 0) * 100:.1f}% | "
-        f"Avg/Day: {report.get('avg_trades_per_day', 0):.1f}\n"
-        f"PnL: ₹{total_pnl:,.0f} | Return: {return_pct:+.2f}%\n"
+        f"Completed: {report.get('completed_trades', report.get('total_trades', 0))} trades | "
+        f"Win: {report.get('win_rate', 0) * 100:.1f}%\n"
+        f"Realized PnL: ₹{realized_pnl:,.0f}\n"
+        f"{open_position_section}"
+        f"<b>💰 TOTAL: ₹{total_pnl:,.0f}</b> ({return_pct:+.2f}%)\n"
         f"Max DD: ₹{report.get('max_drawdown', 0):,.0f} "
         f"({report.get('max_drawdown_pct', 0):.2f}%)\n\n"
         f"{pattern_section}\n\n"
         f"{capital_section}"
     )
+
+
+def _format_open_position_section(report: Dict[str, Any]) -> str:
+    """Format open position section for Telegram."""
+    if not report.get("has_open_position"):
+        return ""
+
+    open_pos = report.get("open_position", {})
+    if not open_pos:
+        return ""
+
+    direction = open_pos.get("direction", "UNKNOWN")
+    direction_emoji = "🟢" if direction == "LONG" else "🔴"
+    unrealized = report.get("unrealized_pnl", 0)
+    unrealized_sign = "+" if unrealized >= 0 else ""
+
+    lines = [
+        f"\n<b>⚠️ OPEN POSITION</b>",
+        f"{direction_emoji} {direction} Synthetic | {open_pos.get('lots', 1)} lot(s)",
+    ]
+
+    if open_pos.get("entry_price"):
+        lines.append(f"Entry: {open_pos['entry_price']:,.2f}")
+
+    if open_pos.get("current_price"):
+        lines.append(f"Current: {open_pos['current_price']:,.2f}")
+
+    lines.append(f"Unrealized: ₹{unrealized_sign}{unrealized:,.0f}")
+
+    if open_pos.get("hedge_active"):
+        lines.append(f"🛡️ Hedge: Active (exit 09:16 tomorrow)")
+
+    lines.append("")  # Empty line before total
+
+    return "\n".join(lines)
 
 
 def _format_pattern_breakdown(report: Dict[str, Any]) -> str:
@@ -747,8 +789,10 @@ def print_startup(
     print(
         f"   Trading Hours: {config.get('trading_start', '09:15')} - {config.get('trading_end', '15:30')}"
     )
-    print(f"    Brick Size: {config.get('brick_size', '0.04%')} | Reversal Bricks: {config.get('reversal_bricks', 2)}")
-    
+    print(
+        f"    Brick Size: {config.get('brick_size', '0.04%')} | Reversal Bricks: {config.get('reversal_bricks', 2)}"
+    )
+
     print(f"{'=' * 60}")
 
 

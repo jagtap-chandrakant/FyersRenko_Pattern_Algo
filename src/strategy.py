@@ -170,9 +170,10 @@ class RenkoStrategy:
         self.config = config
 
         # Renko parameters
-        self._brick_pct = config["renko_brick_pct"]
-        self._exit_bricks = config["exit_trailing_bricks"]
-        self._entry_start = dtime.fromisoformat(config["entry_start_time"])
+        self._brick_pct       = config["renko_brick_pct"]
+        self._reversal_bricks = config.get("renko_reversal", 2)  # ✅ NEW
+        self._exit_bricks     = config["exit_trailing_bricks"]
+        self._entry_start     = dtime.fromisoformat(config["entry_start_time"])
 
         # Position state
         self.position = 0  # 0=flat, 1=long, -1=short
@@ -209,14 +210,16 @@ class RenkoStrategy:
         # v7.4.0: Indicators and Filters
         # These MUST be created here before initialize_from_warmup() is called
         rsi_period = FILTERS.get("f2_rsi_alignment", {}).get("rsi_period", 14)
-        ma_period = FILTERS.get("f1_ma_alignment", {}).get("ma_period", 40)
-        self.indicators = RenkoIndicators(rsi_period=rsi_period, ma_period=ma_period)
-        self.filters = FilterEngine(FILTERS)
+        ma_period  = FILTERS.get("f1_ma_alignment", {}).get("ma_period", 40)
+        self.indicators       = RenkoIndicators(rsi_period=rsi_period, ma_period=ma_period)
+        self.filters          = FilterEngine(FILTERS)
         self.filtered_signals: List[Dict[str, Any]] = []
 
         logging.info(
-            "RenkoStrategy v7.4.0: brick=%.4f%%, exit=%d bricks, filters=%s",
+            "RenkoStrategy v7.4.0: brick=%.4f%%, reversal=%d bricks, "
+            "exit=%d bricks, filters=%s",
             self._brick_pct * 100,
+            self._reversal_bricks,
             self._exit_bricks,
             "ENABLED" if FILTERS.get("enabled", True) else "DISABLED",
         )
@@ -239,19 +242,23 @@ class RenkoStrategy:
         self._new_brick_indices.clear()
         self._initialized = False
 
-        # Initialize from first bar
+        # ✅ FIX: Round base to nearest brick_size boundary for clean brick levels
         first_close = round(bars[0]["close"], 2)
-        self._brick_high = first_close
-        self._brick_low = first_close
-        self._brick_close = first_close
-        self._brick_size = round(first_close * self._brick_pct, 2)
-        self._trend = 0
-        self._consecutive = 0
-        self._acc_vol = 0.0
+        brick_size  = round(first_close * self._brick_pct, 2)
 
-        if self._brick_size <= 0:
+        if brick_size <= 0:
             logging.error("Invalid brick size from first price %.2f", first_close)
             return
+
+        rounded_base = round(round(first_close / brick_size) * brick_size, 2)
+
+        self._brick_high  = rounded_base
+        self._brick_low   = rounded_base
+        self._brick_close = rounded_base
+        self._brick_size  = brick_size
+        self._trend       = 0
+        self._consecutive = 0
+        self._acc_vol     = 0.0
 
         # Update thresholds
         self._update_thresholds()
@@ -278,7 +285,7 @@ class RenkoStrategy:
         # Log summary
         if self.renko_bricks:
             green = sum(1 for b in self.renko_bricks if b["type"] == 1)
-            red = sum(1 for b in self.renko_bricks if b["type"] == -1)
+            red   = sum(1 for b in self.renko_bricks if b["type"] == -1)
             logging.info(
                 "Warmup complete: %d bricks (%d GREEN, %d RED) | "
                 "Size: %.2f → %.2f (adaptive)",
@@ -288,10 +295,10 @@ class RenkoStrategy:
                 self.renko_bricks[0]["size"],
                 self.renko_bricks[-1]["size"],
             )
-
             if len(self.renko_bricks) >= 10:
                 visual = "".join(
-                    "🟢" if b["type"] == 1 else "🔴" for b in self.renko_bricks[-10:]
+                    "🟢" if b["type"] == 1 else "🔴"
+                    for b in self.renko_bricks[-10:]
                 )
                 logging.info("Last 10 bricks: %s", visual)
         else:
@@ -415,32 +422,37 @@ class RenkoStrategy:
         Called after every brick formation. These thresholds are used
         to determine if the next close price forms a new brick.
 
-        Continuation: 1 brick size from edge (same direction)
-        Reversal: 2 brick sizes from opposite edge (direction change)
+        Continuation : 1 × brick_size from leading edge (same direction)
+        Reversal     : (renko_reversal - 1) × brick_size from opposite edge
 
-        ✅ FIX v7.1.0: Calculate brick_size from EDGE (not close)
-        - GREEN bricks: Use brick_low
-        - RED bricks: Use brick_high
-        - INITIAL: Use brick_close (no trend yet)
+        renko_reversal=2 → reversal distance = 1 × brick_size from opposite edge
+        renko_reversal=3 → reversal distance = 2 × brick_size from opposite edge
+
+        Edge-based brick size calculation:
+        - GREEN bricks: size from brick_low  (trailing edge)
+        - RED bricks:   size from brick_high (trailing edge)
+        - INITIAL:      size from brick_close
         """
-        # ✅ FIX: Edge-based brick size calculation
-        if self._trend == 1:  # GREEN trend
+        # Edge-based brick size calculation
+        if self._trend == 1:    # GREEN trend
             self._brick_size = round(self._brick_low * self._brick_pct, 2)
-        elif self._trend == -1:  # RED trend
+        elif self._trend == -1: # RED trend
             self._brick_size = round(self._brick_high * self._brick_pct, 2)
-        else:  # INITIAL (no trend)
+        else:                   # INITIAL (no trend)
             self._brick_size = round(self._brick_close * self._brick_pct, 2)
 
-        # Continuation thresholds (1 brick size)
+        # Continuation thresholds (1 × brick_size from leading edge)
         self._green_cont_threshold = round(self._brick_high + self._brick_size, 2)
-        self._red_cont_threshold = round(self._brick_low - self._brick_size, 2)
+        self._red_cont_threshold   = round(self._brick_low  - self._brick_size, 2)
 
-        # Reversal thresholds (2 brick sizes from opposite edge)
+        # ✅ FIX: Reversal thresholds read from config via self._reversal_bricks
+        # (renko_reversal - 1) × brick_size from opposite edge
+        reversal_distance = (self._reversal_bricks - 1) * self._brick_size
         self._green_reversal_threshold = round(
-            self._brick_low - (2 * self._brick_size), 2
+            self._brick_low  - reversal_distance, 2
         )
-        self._red_reversal_threshold = round(
-            self._brick_high + (2 * self._brick_size), 2
+        self._red_reversal_threshold   = round(
+            self._brick_high + reversal_distance, 2
         )
 
     def _process_close(
@@ -566,128 +578,77 @@ class RenkoStrategy:
         """
         Add reversal bricks (direction change) one at a time.
 
-        ✅ FIX v7.1.0:
-        1. Start from opposite edge to ensure proper brick connection
-        2. Calculate brick_size from reversal_start (edge)
-        3. Apply 2-brick rule: plot (actual_bricks - 1), minimum 1
+        NON-OVERLAPPING: Reversal bricks start BEYOND the previous brick.
+        - RED reversal after GREEN: starts from GREEN's LOW (bottom edge)
+        - GREEN reversal after RED: starts from RED's HIGH (top edge)
 
-        Args:
-            current_price: Target price
-            timestamp: Brick timestamp
-            new_direction: 1 for GREEN, -1 for RED
+        Per Prashant Shah: plot (actual_bricks - 1), minimum 1 brick.
+        Single brick reversal is valid — required for One-Back pattern.
         """
-        first_brick = True
-        bricks_added = 0
-
-        # Start from opposite edge of previous brick
-        if new_direction == 1:
-            # GREEN reversal: Start from previous RED brick's LOW
-            reversal_start = self._brick_low
+        # ✅ FIX: Use opposite edge so reversal bricks do NOT overlap
+        # with the previous brick
+        if new_direction == 1:  # GREEN reversal (previous was RED)
+            reversal_start = self._brick_high  # Start from RED's HIGH (top)
             price_movement = current_price - reversal_start
-        else:
-            # RED reversal: Start from previous GREEN brick's HIGH
-            reversal_start = self._brick_high
+        else:  # RED reversal (previous was GREEN)
+            reversal_start = self._brick_low   # Start from GREEN's LOW (bottom)
             price_movement = reversal_start - current_price
 
-        # ✅ FIX: Calculate brick_size from reversal_start (edge)
+        # Calculate brick_size from reversal_start
         brick_size = round(reversal_start * self._brick_pct, 2)
         if brick_size <= 0:
             brick_size = self._brick_size  # Fallback to last known size
 
-        actual_bricks = int(price_movement / brick_size) + 1
+        # Per Prashant Shah: plot (actual_bricks - 1), minimum 1
+        # epsilon guards against floating point truncation
+        if price_movement > 0:
+            actual_bricks  = int((price_movement + 1e-9) / brick_size) + 1
+            bricks_to_plot = max(1, actual_bricks - 1)
+        else:
+            bricks_to_plot = 1
 
-        # Apply 2-brick rule: plot (actual_bricks - 1), minimum 1
-        bricks_to_plot = max(1, actual_bricks - 1)
+        bricks_added = 0
+        current_edge = reversal_start  # Track edge for edge-to-edge connection
 
-        # Start building from reversal_start
-        self._brick_close = reversal_start
-
-        for _ in range(bricks_to_plot):
-            # ✅ FIX: Recalculate brick_size from current edge (adaptive)
-            if new_direction == 1:  # GREEN
-                brick_size = round(self._brick_close * self._brick_pct, 2)
-            else:  # RED
-                brick_size = round(self._brick_close * self._brick_pct, 2)
-
-            if brick_size <= 0:
-                break
-
-            if new_direction == 1:
-                # GREEN brick: close moves UP
-                # ✅ FIX: Edge-to-edge connection
-                self._brick_low = self._brick_close
-                self._brick_high = round(self._brick_low + brick_size, 2)
+        for i in range(bricks_to_plot):
+            if new_direction == 1:  # GREEN brick
+                self._brick_low  = current_edge
+                brick_size       = round(self._brick_low * self._brick_pct, 2)
+                if brick_size <= 0:
+                    break
+                self._brick_high  = round(self._brick_low + brick_size, 2)
                 self._brick_close = self._brick_high
+                current_edge      = self._brick_high
 
-            else:
-                # RED brick: close moves DOWN
-                # ✅ FIX: Edge-to-edge connection
-                self._brick_high = self._brick_close
-                self._brick_low = round(self._brick_high - brick_size, 2)
+            else:  # RED brick
+                self._brick_high  = current_edge
+                brick_size        = round(self._brick_high * self._brick_pct, 2)
+                if brick_size <= 0:
+                    break
+                self._brick_low   = round(self._brick_high - brick_size, 2)
                 self._brick_close = self._brick_low
+                current_edge      = self._brick_low
 
-            self._trend = new_direction
-
-            if first_brick:
-                self._consecutive = 1
-                first_brick = False
-            else:
-                self._consecutive += 1
-
-            bricks_added += 1
+            self._trend       = new_direction
+            self._consecutive = i + 1
+            bricks_added     += 1
 
             brick = {
-                "time": timestamp,
-                "close": self._brick_close,
-                "type": new_direction,
-                "size": brick_size,
-                "volume": self._acc_vol if bricks_added == 1 else 0.0,
+                "time":        timestamp,
+                "close":       self._brick_close,
+                "type":        new_direction,
+                "size":        brick_size,
+                "volume":      self._acc_vol if bricks_added == 1 else 0.0,
                 "consecutive": self._consecutive,
-                "high": self._brick_high,
-                "low": self._brick_low,
+                "high":        self._brick_high,
+                "low":         self._brick_low,
             }
 
             self.renko_bricks.append(brick)
             self._new_brick_indices.append(len(self.renko_bricks) - 1)
-
-            # Update thresholds for next brick (adaptive sizing)
             self._update_thresholds()
 
-        # Safety: Ensure at least 1 reversal brick was added
-        if bricks_added == 0:
-            brick_size = round(self._brick_close * self._brick_pct, 2)
-            if brick_size > 0:
-                if new_direction == 1:
-                    # GREEN brick
-                    self._brick_low = self._brick_close
-                    self._brick_high = round(self._brick_low + brick_size, 2)
-                    self._brick_close = self._brick_high
-                else:
-                    # RED brick
-                    self._brick_high = self._brick_close
-                    self._brick_low = round(self._brick_high - brick_size, 2)
-                    self._brick_close = self._brick_low
-
-                self._trend = new_direction
-                self._consecutive = 1
-
-                brick = {
-                    "time": timestamp,
-                    "close": self._brick_close,
-                    "type": new_direction,
-                    "size": brick_size,
-                    "volume": self._acc_vol,
-                    "consecutive": self._consecutive,
-                    "high": self._brick_high,
-                    "low": self._brick_low,
-                }
-
-                self.renko_bricks.append(brick)
-                self._new_brick_indices.append(len(self.renko_bricks) - 1)
-
         self._acc_vol = 0.0
-
-        # Final threshold update after all reversal bricks added
         self._update_thresholds()
 
     # =========================================================================
@@ -995,13 +956,13 @@ class RenkoStrategy:
 
         print()
         print("INDICATORS:")
-        print(f"  RSI(14): {rsi_val:.2f if not math.isnan(rsi_val) else 'N/A'}")
-        print(f"  MA(40):  {ma_val:,.2f if not math.isnan(ma_val) else 'N/A'}")
-        print(
-            f"  Disp:    {disp_val:.4f}%"
-            if not math.isnan(disp_val)
-            else "  Disp:    N/A"
-        )
+        rsi_str = f"{rsi_val:.2f}" if not math.isnan(rsi_val) else "N/A"
+        ma_str = f"{ma_val:,.2f}" if not math.isnan(ma_val) else "N/A"
+        disp_str = f"{disp_val:.4f}%" if not math.isnan(disp_val) else "N/A"
+
+        print(f"  RSI(14): {rsi_str}")
+        print(f"  MA(40):  {ma_str}")
+        print(f"  Disp:    {disp_str}")
         print(f"  Ready:   {'YES' if self.indicators.is_ready else 'NO (warming up)'}")
 
         # v7.4.0: Filter stats
