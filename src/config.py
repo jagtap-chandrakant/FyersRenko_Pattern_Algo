@@ -394,7 +394,7 @@ STRATEGY: Dict[str, Any] = {
     "trading_end": "15:30",
     "entry_start_time": "09:16",
     # Risk management
-    "max_consecutive_losses": 10,
+    "max_consecutive_losses": 25,
     "max_daily_loss": 15000,
     "max_hold_hours": 168,
     # Entry rules

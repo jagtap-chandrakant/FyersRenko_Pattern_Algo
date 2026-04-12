@@ -606,14 +606,18 @@ def should_exit_hedge_only(
 
     Called next day at 9:16 AM if no exit signal generated.
 
+    Logic: Hedge is bought at 3:25 PM (market closes 3:30 PM).
+    Any check at 9:16 AM is guaranteed to be next day (market opens 9:15 AM).
+    This makes date checking unnecessary - the time window alone is sufficient.
+
     Only exit hedge if:
     1. Position is still open (position != 0)
     2. Hedge is active (hedge_bought=True)
     3. Hedge exit is pending (hedge_exit_pending=True)
-    4. Time is >= 9:16 AM
+    4. Time is in morning exit window (9:16 AM - 9:30 AM)
 
     Args:
-        position: Current position
+        position: Current position (0=flat, 1=long, -1=short)
         hedge_bought: Whether hedge is active
         hedge_exit_pending: Flag set after hedge was bought at 3:25 PM
         current_time: Current datetime
@@ -637,11 +641,23 @@ def should_exit_hedge_only(
     if not hedge_exit_pending:
         return False, "Hedge exit not pending"
 
-    from src.config import NEXT_DAY_HEDGE_EXIT_TIME
-
     time_now = current_time.time()
-
-    if time_now >= NEXT_DAY_HEDGE_EXIT_TIME:
+    
+    # ✅ CRITICAL FIX: Only exit in narrow morning window (9:16-9:30 AM)
+    # This is SAFE because:
+    # - Hedge is bought at 3:25 PM (15:25)
+    # - Market closes at 3:30 PM (15:30)
+    # - Market opens at 9:15 AM next day
+    # - Therefore, any 9:16 AM check is GUARANTEED to be the next day
+    # - No need for date comparison
+    if dtime(9, 16) <= time_now <= dtime(9, 30):
+        logging.info(
+            "✅ Hedge exit conditions met: time=%s, position=%d, hedge_bought=%s, exit_pending=%s",
+            time_now.strftime("%H:%M:%S"),
+            position,
+            hedge_bought,
+            hedge_exit_pending
+        )
         return True, f"Next day hedge exit at {time_now.strftime('%H:%M:%S')}"
 
     return False, ""
@@ -1680,11 +1696,12 @@ class Trader:
         self.buy_entry_price: Optional[float] = None
         self.sell_entry_price: Optional[float] = None
 
-        # ✅ NEW: Hedge tracking
+        # ✅ UPDATED: Hedge tracking with buy date
         self.hedge_symbol: Optional[str] = None
         self.hedge_entry_price: Optional[float] = None
         self.hedge_bought: bool = False
-        self.hedge_exit_pending: bool = False  # Flag for next-day hedge exit
+        self.hedge_exit_pending: bool = False
+        self.hedge_buy_date: Optional[date] = None  # ✅ ADD THIS
 
         self.daily_pnl = 0.0
         self.consecutive_losses = 0
@@ -2194,11 +2211,23 @@ class Trader:
         self.buy_entry_price = state.get("buy_entry_price")
         self.sell_entry_price = state.get("sell_entry_price")
 
-        # Load hedge state
+        # ✅ UPDATED: Load hedge state with buy date
         self.hedge_symbol = state.get("hedge_symbol")
         self.hedge_entry_price = state.get("hedge_entry_price")
         self.hedge_bought = state.get("hedge_bought", False)
         self.hedge_exit_pending = state.get("hedge_exit_pending", False)
+        
+        # ✅ ADD THIS: Load hedge buy date
+        hedge_buy_date_str = state.get("hedge_buy_date")
+        if hedge_buy_date_str:
+            try:
+                self.hedge_buy_date = datetime.fromisoformat(hedge_buy_date_str).date()
+                logging.info("✅ Loaded hedge buy date: %s", self.hedge_buy_date)
+            except (ValueError, AttributeError) as e:
+                logging.warning("Failed to parse hedge_buy_date '%s': %s", hedge_buy_date_str, e)
+                self.hedge_buy_date = None
+        else:
+            self.hedge_buy_date = None
 
         # Recover option_symbol from buy_symbol if missing
         if self.position != 0 and not self.option_symbol and self.buy_symbol:
@@ -2257,6 +2286,8 @@ class Trader:
                     print(
                         f"   🛡️ HEDGE: {self.hedge_symbol} @ ₹{self.hedge_entry_price:.2f}"
                     )
+                    if self.hedge_buy_date:
+                        print(f"   📅 Hedge Buy Date: {self.hedge_buy_date}")
                     if self.hedge_exit_pending:
                         print(f"   ⏰ Hedge exit pending at 9:16 AM")
 
@@ -2422,11 +2453,12 @@ class Trader:
             "buy_entry_volume": getattr(self.executor, "buy_entry_volume", 0),
             "sell_entry_oi": getattr(self.executor, "sell_entry_oi", 0),
             "sell_entry_volume": getattr(self.executor, "sell_entry_volume", 0),
-            # ✅ NEW: Save hedge state
+            # ✅ UPDATED: Save hedge state with buy date
             "hedge_symbol": self.hedge_symbol,
             "hedge_entry_price": self.hedge_entry_price,
             "hedge_bought": self.hedge_bought,
             "hedge_exit_pending": self.hedge_exit_pending,
+            "hedge_buy_date": self.hedge_buy_date.isoformat() if hasattr(self, 'hedge_buy_date') and self.hedge_buy_date else None,  # ✅ ADD THIS
             # Existing state
             "daily_pnl": self.daily_pnl,
             "consecutive_losses": self.consecutive_losses,
@@ -2478,25 +2510,53 @@ class Trader:
         time_module.sleep(WAIT_SLEEP)
 
     def _process_minute(self, current_time: datetime):
-        """Process each minute of trading with corrected hedge logic."""
-
-        # Position reconciliation (every 5 minutes)
+        """
+        Process each minute of trading with corrected hedge logic and operation order.
+        
+        CRITICAL ORDER OF OPERATIONS (DO NOT REORDER):
+        ================================================
+        1. Expiry day exit check (highest priority - must exit on expiry)
+        2. Hedge buy check (3:25 PM - buy protection before close)
+        3. Fetch and process bar (get market data)
+        4. Handle new bricks (display brick formation)
+        5. Handle trading signals (EXIT/ENTRY) - BEFORE status display ⚠️
+        6. Hedge exit check (9:16 AM next day - only if no exit signal)
+        7. Update position LTP (refresh current prices)
+        8. Display status (LAST - so crashes don't block exits) ⚠️
+        9. Periodic state save (persist state every 5 minutes)
+        
+        Why this order matters:
+        - Steps 1-5 are CRITICAL and must execute before status display
+        - Step 5 (signal handling) MUST happen before step 8 (status display)
+        - If status display crashes, exits have already been executed
+        - Non-critical operations (LTP update, display) are protected with try-except
+        
+        Args:
+            current_time: Current datetime (timezone-aware)
+        """
+        
+        # ================================================================
+        # STEP 0: Position reconciliation (every 5 minutes)
+        # Verify internal positions match broker positions
+        # ================================================================
         if current_time.minute % 5 == 0 and current_time.second < 10:
             self._reconcile_positions()
 
         expiry = self.current_expiry
 
         # ================================================================
-        # STEP 1: Check expiry day exit (MUST exit on expiry day)
+        # STEP 1: Check expiry day exit (HIGHEST PRIORITY)
+        # MUST exit on expiry day to avoid physical settlement
         # ================================================================
         should_exit, reason = check_expiry_exit(self.position, expiry)
         if should_exit:
-            logging.warning("⚠️ Expiry exit: %s", reason)
+            logging.warning("⚠️ Expiry exit triggered: %s", reason)
             self._force_exit_with_hedge(current_time, reason)
-            return
+            return  # Exit immediately - nothing else to do
 
         # ================================================================
         # STEP 2: Check if hedge should be BOUGHT (3:25 PM)
+        # Buy protective hedge before market close if position is open
         # Only if position is open and hedge not already bought
         # ================================================================
         if self.position != 0 and not self.hedge_bought:
@@ -2505,10 +2565,15 @@ class Trader:
             )
             if should_buy:
                 logging.info("🛡️ Buying hedge: %s", buy_reason)
-                self._buy_hedge(current_time, buy_reason)
+                try:
+                    self._buy_hedge(current_time, buy_reason)
+                except Exception as exc:
+                    logging.error("❌ Hedge buy failed: %s", exc, exc_info=True)
+                    send_risk_alert("hedge_buy_failed", str(exc))
 
         # ================================================================
         # STEP 3: Fetch and process bar
+        # Get latest 1-minute OHLCV data from broker
         # ================================================================
         logging.info("📊 Fetching latest bar...")
         bar = self.data_engine.get_latest_bar()
@@ -2527,10 +2592,11 @@ class Trader:
             bar["volume"],
         )
 
-        # Store bar for export
+        # Store bar for export (daily chart generation)
         self._all_bars.append(bar)
 
         # Process strategy to check for signals
+        # This updates Renko bricks and detects entry/exit patterns
         signal_result = self.strategy.on_1min_bar(
             bar["timestamp"],
             bar["open"],
@@ -2540,23 +2606,51 @@ class Trader:
             bar["volume"],
         )
 
-        # Update LTP if position open
-        if self.position != 0 and (self.buy_symbol or self.option_symbol):
-            self._update_position_ltp()
-
-            # Save state every 2 minutes when position is open
-            if current_time.minute % 2 == 0:
-                self._save_state()
-
-        # Display status periodically
-        self._maybe_display_status(current_time)
-
-        # Handle new bricks
+        # ================================================================
+        # STEP 4: Handle new bricks (display brick formation)
+        # Show visual feedback when new Renko bricks form
+        # ================================================================
         if self.strategy.has_new_bricks():
             self._handle_new_bricks(current_time)
 
         # ================================================================
-        # STEP 4: Check if hedge should be EXITED (next day 9:16 AM)
+        # STEP 5: Handle trading signal IMMEDIATELY (BEFORE status display)
+        # ⚠️ CRITICAL: This ensures exit signals are executed even if status display crashes
+        # This is the MOST IMPORTANT step - must happen before anything that can crash
+        # ================================================================
+        if signal_result:
+            action = signal_result.get("action", "")
+            logging.info("🎯 Signal detected: %s", action)
+            
+            try:
+                # Execute the signal (entry or exit)
+                self._handle_signal(signal_result, expiry, current_time)
+                
+                # If exit was executed, position is now flat
+                # Skip remaining steps and save state immediately
+                if action == "EXIT":
+                    logging.info("✅ Exit executed - position now flat")
+                    self._save_state()
+                    
+                    # Display exit confirmation (safe - position already closed)
+                    try:
+                        print(f"\n{'=' * 80}")
+                        print(f"✅ EXIT COMPLETED at {current_time.strftime('%H:%M:%S')}")
+                        print(f"   Reason: {signal_result.get('exit_reason', 'trailing_stop')}")
+                        print(f"{'=' * 80}\n")
+                    except Exception:
+                        pass
+                    
+                    return  # Exit immediately - nothing else to do
+                    
+            except Exception as exc:
+                logging.error("❌ CRITICAL: Signal handling failed: %s", exc, exc_info=True)
+                # Send alert but don't crash - try to continue
+                send_risk_alert("signal_execution_failed", f"{action}: {exc}")
+                # Don't return - try to continue with other operations
+
+        # ================================================================
+        # STEP 6: Check if hedge should be EXITED (next day 9:16 AM)
         # This is ONLY for the case where NO exit signal was generated
         # and we want to close hedge but KEEP main position
         # ================================================================
@@ -2569,22 +2663,72 @@ class Trader:
 
             if should_exit_hedge:
                 logging.info("🛡️ Exiting hedge only (continuation): %s", hedge_reason)
-                self._exit_hedge_only(current_time, hedge_reason)
-                # Main position remains OPEN - do NOT reset position state
+                try:
+                    self._exit_hedge_only(current_time, hedge_reason)
+                    # Main position remains OPEN - do NOT reset position state
+                    logging.info("✅ Hedge exited - main position continues")
+                except Exception as exc:
+                    logging.error("❌ Hedge exit failed: %s", exc, exc_info=True)
+                    send_risk_alert("hedge_exit_failed", str(exc))
 
         # ================================================================
-        # STEP 5: Handle trading signal (entry or exit)
-        # If EXIT signal, close EVERYTHING (main + hedge)
+        # STEP 7: Update LTP if position open (after signal handling)
+        # Refresh current prices for display and monitoring
         # ================================================================
-        if signal_result:
-            self._handle_signal(signal_result, expiry, current_time)
+        if self.position != 0 and (self.buy_symbol or self.option_symbol):
+            try:
+                self._update_position_ltp()
+            except Exception as exc:
+                logging.error("❌ LTP update failed (non-critical): %s", exc)
+                # Don't crash - this is informational only
 
-        # Periodic state save
-        if (
-            current_time - self._last_state_save
-        ).total_seconds() >= STATE_SAVE_INTERVAL:
-            self._save_state()
-            self._last_state_save = current_time
+            # Save state every 2 minutes when position is open
+            if current_time.minute % 2 == 0:
+                try:
+                    self._save_state()
+                except Exception as exc:
+                    logging.error("❌ State save failed: %s", exc)
+
+        # ================================================================
+        # STEP 8: Display status (LAST - with error protection)
+        # ⚠️ Even if this crashes, exits have already been executed
+        # This is purely informational - crashes here are non-critical
+        # ================================================================
+        try:
+            self._maybe_display_status(current_time)
+        except Exception as exc:
+            logging.error("❌ Status display error (non-critical): %s", exc, exc_info=True)
+            # Don't crash - status display is informational only
+            # Print minimal fallback status instead
+            try:
+                print(f"\n⚠️ Status display error at {current_time.strftime('%H:%M:%S')}")
+                print(f"   Error: {str(exc)[:100]}")
+                if self.position != 0:
+                    direction = "LONG" if self.position == 1 else "SHORT"
+                    print(f"   Position: {direction} | Lots: {self.current_lots}")
+                    if self.buy_symbol:
+                        print(f"   Buy: {self.buy_symbol}")
+                    if self.sell_symbol:
+                        print(f"   Sell: {self.sell_symbol}")
+                    if self.hedge_bought:
+                        print(f"   Hedge: Active")
+                else:
+                    print(f"   Position: FLAT")
+                print(f"{'=' * 80}\n")
+            except Exception:
+                # Even fallback failed - just log and continue
+                logging.error("❌ Fallback status display also failed")
+
+        # ================================================================
+        # STEP 9: Periodic state save
+        # Save state every 5 minutes (STATE_SAVE_INTERVAL)
+        # ================================================================
+        if (current_time - self._last_state_save).total_seconds() >= STATE_SAVE_INTERVAL:
+            try:
+                self._save_state()
+                self._last_state_save = current_time
+            except Exception as exc:
+                logging.error("❌ Periodic state save failed: %s", exc)
 
     def _reconcile_positions(self):
         """Reconcile positions with broker."""
@@ -2814,18 +2958,36 @@ class Trader:
                                 f"Stop: {stop:.2f} (2 bricks up)"
                             )
 
-                        # Holding time
+                        # ✅ FIX: Holding time with timezone handling
                         if self.entry_info and self.entry_info.get("time"):
                             entry_time = self.entry_info["time"]
+                            
                             if hasattr(entry_time, "strftime"):
-                                holding = (
-                                    current_time - entry_time
-                                ).total_seconds() / 3600
-                                print(
-                                    f"   ⏱️ Entry: "
-                                    f"{entry_time.strftime('%d-%b %H:%M')} | "
-                                    f"Holding: {holding:.1f}h"
-                                )
+                                # ✅ CRITICAL FIX: Ensure both datetimes are timezone-aware
+                                from src.config import IST
+                                
+                                # Make entry_time timezone-aware if needed
+                                if entry_time.tzinfo is None:
+                                    entry_time = IST.localize(entry_time)
+                                else:
+                                    entry_time = entry_time.astimezone(IST)
+                                
+                                # Make current_time timezone-aware if needed
+                                current_time_aware = current_time
+                                if current_time.tzinfo is None:
+                                    current_time_aware = IST.localize(current_time)
+                                
+                                try:
+                                    holding = (current_time_aware - entry_time).total_seconds() / 3600
+                                    print(
+                                        f"   ⏱️ Entry: "
+                                        f"{entry_time.strftime('%d-%b %H:%M')} | "
+                                        f"Holding: {holding:.1f}h"
+                                    )
+                                except TypeError as e:
+                                    logging.error("Timezone error in holding calculation: %s", e)
+                                    print(f"   ⏱️ Entry: {entry_time.strftime('%d-%b %H:%M')}")
+                                    
                     elif self.option_symbol:
                         current_opt = self.current_option_price or 0
                         entry_opt = self.entry_option_price or 0
@@ -2973,6 +3135,7 @@ class Trader:
             self.hedge_entry_price = None
             self.hedge_bought = False
             self.hedge_exit_pending = False
+            self.hedge_buy_date = None
 
             self.current_lots = STRATEGY["initial_lots"]
 
@@ -3108,6 +3271,7 @@ class Trader:
                     self.hedge_entry_price = filled_price
                     self.hedge_bought = True
                     self.hedge_exit_pending = True  # Flag for next-day exit
+                    self.hedge_buy_date = current_time.date()  # ✅ ADD THIS
 
                     logging.info(
                         "✅ Hedge bought: %s @ ₹%.2f (qty=%d)",
@@ -3122,6 +3286,7 @@ class Trader:
                     print(f"   Price: ₹{filled_price:.2f}")
                     print(f"   Quantity: {quantity}")
                     print(f"   Protects: {self.sell_symbol}")
+                    print(f"   Buy Date: {current_time.date()}")  # ✅ ADD THIS
                     print(f"   Next Action: Exit hedge at 9:16 AM (if no exit signal)")
                     print(f"{'=' * 80}\n")
 
@@ -3134,6 +3299,7 @@ class Trader:
                 self.hedge_entry_price = hedge_price
                 self.hedge_bought = True
                 self.hedge_exit_pending = True
+                self.hedge_buy_date = current_time.date()  # ✅ ADD THIS
 
                 logging.info(
                     "✅ Hedge bought (PAPER): %s @ ₹%.2f", hedge_symbol, hedge_price
@@ -3249,6 +3415,7 @@ class Trader:
             self.hedge_entry_price = None
             self.hedge_bought = False
             self.hedge_exit_pending = False
+            self.hedge_buy_date = None
 
             self._save_state()
 
@@ -3421,6 +3588,7 @@ class Trader:
         self.hedge_entry_price = None
         self.hedge_bought = False
         self.hedge_exit_pending = False
+        self.hedge_buy_date = None
 
         self.strategy.position = 0
         self.strategy.entry_info = None

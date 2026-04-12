@@ -723,16 +723,24 @@ def print_trade_execution(trade: Dict[str, Any], trade_number: int = 0) -> None:
         pnl = trade.get("pnl", 0)
         emoji = "✅" if pnl >= 0 else "❌"
 
-        # ✅ NEW: Get exit reason
+        # Get exit reason
         exit_reason = trade.get("exit_reason", "trailing_stop")
 
         lots = trade.get("lots", 1)
         pnl_pct = (pnl / (lots * CAPITAL_PER_LOT)) * 100 if lots > 0 else 0
 
-        entry_opt = trade.get("option_entry_price") or 0.0
-        exit_opt = trade.get("option_exit_price") or 0.0
+        # ✅ FIX: Use synthetic future prices (buy/sell legs)
+        buy_entry = trade.get("buy_entry_price", 0)
+        buy_exit = trade.get("buy_exit_price", 0)
+        sell_entry = trade.get("sell_entry_price", 0)
+        sell_exit = trade.get("sell_exit_price", 0)
+        
         entry_nifty = trade.get("entry_price") or 0.0
-        exit_nifty = trade.get("nifty_price") or 0.0
+        exit_nifty = trade.get("nifty_price") or trade.get("price") or 0.0
+
+        # Calculate net premium at entry and exit
+        net_entry = buy_entry - sell_entry
+        net_exit = buy_exit - sell_exit
 
         print(
             f"{emoji} #{trade_number} EXIT | Reason: {exit_reason.replace('_', ' ').title()} | "
@@ -741,22 +749,48 @@ def print_trade_execution(trade: Dict[str, Any], trade_number: int = 0) -> None:
         )
         print(
             f"   Nifty: {entry_nifty:,.2f}→{exit_nifty:,.2f} | "
-            f"Opt: ₹{entry_opt:.2f}→₹{exit_opt:.2f}"
+            f"Net Premium: ₹{net_entry:.2f}→₹{net_exit:.2f}"
         )
+        
+        # Show individual leg details
+        buy_symbol = trade.get("buy_symbol", "")
+        sell_symbol = trade.get("sell_symbol", "")
+        
+        if buy_symbol and sell_symbol:
+            buy_type = "CE" if "CE" in buy_symbol else "PE"
+            sell_type = "CE" if "CE" in sell_symbol else "PE"
+            
+            print(
+                f"   📗 BUY {buy_type}: ₹{buy_entry:.2f}→₹{buy_exit:.2f} | "
+                f"📕 SELL {sell_type}: ₹{sell_entry:.2f}→₹{sell_exit:.2f}"
+            )
 
     elif action in ("LONG", "SHORT"):
         emoji = "🟢" if action == "LONG" else "🔴"
 
-        # ✅ NEW: Get pattern info
+        # Get pattern info
         pattern_name = trade.get("pattern_name", "Unknown")
         pattern_type = trade.get("pattern_type", "")
 
-        strike = _extract_strike(trade.get("symbol", ""))
+        # ✅ FIX: Use synthetic future prices
+        buy_symbol = trade.get("buy_symbol", "")
+        sell_symbol = trade.get("sell_symbol", "")
+        buy_price = trade.get("buy_entry_price", 0)
+        sell_price = trade.get("sell_entry_price", 0)
+        net_premium = trade.get("net_premium", buy_price - sell_price)
+
+        # Extract option types for display
+        buy_type = "CE" if "CE" in buy_symbol else "PE"
+        sell_type = "CE" if "CE" in sell_symbol else "PE"
 
         print(
             f"{emoji} #{trade_number} {action} | Pattern: {pattern_name} ({pattern_type}) | "
-            f"{strike} | Opt: ₹{trade.get('option_entry_price', 0):.2f} | "
+            f"Net: ₹{net_premium:.2f} | "
             f"{trade.get('lots', 0)}L | Exp: {expiry}"
+        )
+        print(
+            f"   📗 BUY {buy_type}: ₹{buy_price:.2f} | "
+            f"📕 SELL {sell_type}: ₹{sell_price:.2f}"
         )
 
 
